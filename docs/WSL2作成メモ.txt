@@ -75,6 +75,7 @@ curl -L https://github.com/okamoto53515606/homepage/archive/refs/heads/main.tar.
 rm -rf  migration_project_v1_to_v2  docs prompt_history
 cp env_template.txt .env
 
+# チェックコマンド(WSL)
 echo "=== versions ===" && \
 node -v && npm -v && \
 aws --version && \
@@ -90,5 +91,30 @@ echo "=== AWS auth (.env) ===" && \
   set -a && [ -f .env ] && . ./.env; set +a; \
   aws sts get-caller-identity )
 
+# wslイメージ作成(Windows)
+d:
+cd .\wsl_backup\
 wsl --export Ubuntu homepage-v2-latest.tar
 
+# wslイメージ圧縮(WSL)
+cd /mnt/d/wsl_backup
+gzip -9 -k homepage-v2-latest.tar
+# gz に対してハッシュを取る（配布するのは .gz のほうなので）
+sha256sum homepage-v2-latest.tar.gz > homepage-v2-latest.tar.gz.sha256
+ls -l --si
+
+# ghコマンド
+d:
+cd .\homepage-v2-installer\
+winget install --id GitHub.cli -e --accept-package-agreements --accept-source-agreements
+gh auth login
+
+# githubリリース作成(Windows)
+d:
+cd .\homepage-v2-installer\
+gh release create v2.0.0 `
+   D:\wsl_backup\homepage-v2-latest.tar.gz `
+   D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+   --repo okamoto53515606/homepage `
+   --title "v2.0.0" `
+   --notes "homepage-v2をリリースしました！"

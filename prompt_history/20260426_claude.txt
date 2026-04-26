@@ -657,3 +657,882 @@ Ran terminal command: $utf8Bom=New-Object System.Text.UTF8Encoding($true); $p='D
 
 Made changes.
 
+User: installerのWSLイメージダウンロードpub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tarがかなり進捗が遅い、対策ありますか？windows側でウィルスチェックしてる？R2が悪い？DLの実装が悪い？まずはご意見だけ下さい。
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/installer/scripts)
+
+Searched for regex `homepage-v2-latest|r2\.dev|Invoke-WebRequest|BitsTransfer|Start-BitsTransfer|DownloadFile|curl|aria2` (`**/installer/**`), 13 results
+
+意見だけ、要点で。
+
+## 切り分けの見立て（可能性が高い順）
+
+1. **DL実装が一番怪しい**  
+   Inno Setupの `DownloadPage`（内部は WinHTTP のシングルストリーム）を使っています。
+   - 単一TCPコネクション・固定バッファで、**並列/レンジ分割なし**。Cloudflare R2 は1コネクションあたり数MB/s程度に絞られることがあり、回線が太くても伸びません。
+   - tar（おそらく数百MB～GB級）だと体感で「異常に遅い」になりがちです。
+   - 対策候補: 
+     - `curl.exe`（Windows 10 1803+ 標準）で `--http2 -C -`（レジューム）
+     - `aria2c` を同梱して `-x 8 -s 8 -k 1M`（並列8コネクション、これが一番効く）
+     - 最低でも `Start-BitsTransfer`（複数セッション、レジューム可、低優先度回避）
+   - 経験上、R2 pub URL に対して aria2c の `-x 8` で **5～10倍** 速くなるケースが多いです。
+
+2. **R2側の要因**  
+   `pub-xxx.r2.dev` は **開発/小規模配布向け** の無料公開URLで、Cloudflareがレート制限・帯域シェーピングを行う想定です。本番配布用にはカスタムドメイン＋CDN（Cache Rules で `Cache-Control: public, max-age=...` を効かせる）に載せ替える方が安定します。
+   - 1回目はオリジン取得で遅くても、2回目以降キャッシュHITで高速化、という挙動も pub URL では弱い。
+   - HEAD で `cf-cache-status` と `Accept-Ranges: bytes` を確認するのが先決。Range が効くなら並列DLで一気に改善します。
+
+3. **Windows Defender / SmartScreen**  
+   - Defender のリアルタイムスキャンは **書き込み中のtarを逐次スキャン**するため、巨大tarだと**書き込みスループットが落ちます**（CPU 1コアが `MsMpEng.exe` で張り付く）。タスクマネージャで `Antimalware Service Executable` が高ければクロ。
+   - SmartScreen は exe/MSI 主体でtar自体には基本効きませんが、署名なしインストーラ全体の起動が遅れることはあります。
+   - 対策: インストーラのキャッシュフォルダ（例: `%ProgramData%\HomepageV2\cache`）を**Defender除外**に追加、または**署名済みtar.gzに圧縮**して転送量を半減（tarならgzipで30-60%縮むことが多い）。
+
+## 優先順位の提案
+
+1. **まず計測**: `curl.exe -o NUL https://pub-...tar` で素の速度、`curl --range 0-10485760` でRange可否、HEAD で `cf-cache-status` を確認。
+2. **効果が一番大きい**: ダウンローダを `aria2c -x 8 -s 8` に差し替え（同梱）。それだけで多くの環境で解決します。
+3. **次に**: tar を **zstd または gzip 圧縮**（`.tar.zst` / `.tar.gz`）にして転送量自体を削減。WSL `--import` は gzip tar を直接受けます。
+4. **最後に**: pub URL からカスタムドメイン+Cache Rules、必要ならGitHub Releases / Cloudflare R2 の署名URL等への移行を検討。
+
+私見としては「**DL実装（シングルストリーム）+ Defender 逐次スキャン**」が主因、**R2 pub URL** が副因、という構成だと思います。まずは aria2c 並列DL と Defender 除外＋圧縮で大きく改善するはずです。
+
+User: windows の wsl --install はすぐにおわるので、それをexportしたイメージのDLに時間がかかるのはなぜ？という観点です。今インストーラーがDL中ですが、中止した方がいいでしょうか？計測にあたり。
+
+GitHub Copilot: ## なぜ `wsl --install` は速くてカスタムtarのDLは遅いのか
+
+`wsl --install`（既定の Ubuntu）は、Microsoft が **Microsoft Store / Azure Front Door (AFD) CDN** から配信しています。これは:
+
+- 世界中にエッジが分散した本物のCDN（日本ならまず東京/大阪エッジから配信）
+- HTTP/2、巨大なエッジキャッシュ、十分な帯域シェーピング
+- Windows Update の配信基盤と同等で、家庭回線でも数十～数百Mbps出る
+
+一方、`pub-xxx.r2.dev` は:
+
+- Cloudflare R2 の **開発者向け公開URL**で、本番配布用ではない（Cloudflare自身が "for development purposes" と明記）
+- レート制限あり（公開ドキュメント上も "rate limits apply"）
+- カスタムドメイン+Cache Rulesを通さないと、CDNキャッシュが十分効かない構成になりがち
+- 1コネクションあたりの帯域が絞られやすい
+
+そこに **Inno Setup の DownloadPage（シングルストリーム・レンジなし）** が重なるので、`wsl --install` の体感（CDN+OS最適化されたDL）と比べて極端に遅く見える、というのが構造的な答えです。**Defender のリアルタイムスキャンも追い打ち**になりますが、本質はネットワーク側です。
+
+## 今のDLは中止すべきか？
+
+**中止していいです。** むしろ計測のために中止推奨。理由:
+
+1. 今のDLは Inno Setup 内蔵DL = 計測したい「素のR2の速さ」ではなく「Inno DL実装込みの速さ」しか測れない。切り分けにならない。
+2. R2 pub URL は **Range リクエスト対応**なので、`curl.exe -C -` で**続きから再開DL可**。これまでのDLが完全に無駄になるわけではありません（インストーラのキャッシュに残っていれば、後でリネームして使い回せる可能性もあり）。
+3. tar.sha256 は数十バイトなので即DLできます。
+
+## 中止後にやる計測（コピペ用）
+
+```powershell
+$Url = 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar'
+
+# 1) ヘッダ確認: Range対応か、CDNキャッシュ状態か
+curl.exe -sI $Url
+# 見るべき項目:
+#   Accept-Ranges: bytes        ← 並列DL可能
+#   cf-cache-status: HIT/MISS   ← MISSばかりなら配信構成見直し余地あり
+#   content-length              ← サイズ把握
+
+# 2) 素の単一ストリーム速度（30秒だけ計測して中断）
+curl.exe -o NUL --max-time 30 -w "speed=%{speed_download} bytes/s  size=%{size_download}\n" $Url
+
+# 3) HTTP/2 強制 + 単一ストリーム
+curl.exe --http2 -o NUL --max-time 30 -w "speed=%{speed_download} bytes/s\n" $Url
+
+# 4) 並列DLの効果確認（aria2c があれば）
+#   winget install aria2.aria2
+aria2c -x 8 -s 8 -k 1M -d $env:TEMP -o test.tar $Url
+```
+
+この4つの数字が揃えば、**「R2が遅いのか / 単一ストリーム上限なのか / Defenderの書き込みペナルティなのか」**がほぼ確定します。  
+特に `(2)単一` vs `(4)並列8` の比 → DL実装変更の効果見積もり、`cf-cache-status` → R2配信側の改善余地、が分かります。
+
+Defender影響の切り分けは、`(2)` 実行中に `タスクマネージャ` で `Antimalware Service Executable` の CPU/Disk を見るのが手っ取り早いです。
+
+User: 
+
+$Url = 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar'
+
+# 1) ヘッダ確認: Range対応か、CDNキャッシュ状態か
+curl.exe -sI $Url
+# 見るべき項目:
+#   Accept-Ranges: bytes        ← 並列DL可能
+#   cf-cache-status: HIT/MISS   ← MISSばかりなら配信構成見直し余地あり
+#   content-length              ← サイズ把握
+
+# 2) 素の単一ストリーム速度（30秒だけ計測して中断）
+curl.exe -o NUL --max-time 30 -w "speed=%{speed_download} bytes/s  size=%{size_download}\n" $Url
+
+
+PS D:\work\homepage-v2-installer> curl.exe -o NUL --max-time 30 -w "speed=%{speed_download} bytes/s  size=%{size_download}\n" $Url
+  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
+                                 Dload  Upload  Total   Spent   Left   Speed
+  0  2.81G   0 12.65M   0      0 431.9k      0 1:53:58   00:30 1:53:28 213.2k
+
+
+
+# 3) HTTP/2 強制 + 単一ストリーム
+curl.exe --http2 -o NUL --max-time 30 -w "speed=%{speed_download} bytes/s\n" $Url
+curl: option --http2: the installed libcurl version does not support this
+curl: try 'curl --help' for more information
+
+# 4) 並列DLの効果確認（aria2c があれば）
+#   winget install aria2.aria2
+aria2c -x 8 -s 8 -k 1M -d $env:TEMP -o test.tar $Url
+
+
+PS D:\work\homepage-v2-installer> $Url = 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar'
+PS D:\work\homepage-v2-installer> aria2c -x 8 -s 8 -k 1M -d $env:TEMP -o test.tar $Url
+
+04/26 11:44:29 [NOTICE] Downloading 1 item(s)
+
+04/26 11:44:30 [NOTICE] Allocating disk space. Use --file-allocation=none to disable it. See --file-allocation option in man page for more details.
+[#e9c67b 25MiB/2.8GiB(0%) CN:8 DL:1.3MiB ETA:36m9s]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GitHub Copilot: ## 計測結果の解釈
+
+| 項目 | 値 | 意味 |
+|---|---|---|
+| ファイルサイズ | 2.81GB | でかい。これは別途圧縮で対処余地あり |
+| 単一ストリーム | **約430KB/s ≈ 3.4Mbps** | 異常に遅い |
+| 並列8 (aria2c) | **約1.3MB/s ≈ 10Mbps** | 3倍に改善するが、それでも遅い |
+
+## 結論
+
+**R2 pub URL の帯域シェーピングが主犯**です。DL実装の問題（Inno Setupのシングルストリーム）も二次的にありますが、本質はR2側。理由:
+
+1. 単一430KB/s は明らかにCloudflare R2の **pub-xxx.r2.dev へのレート制限**にかかっている速度。家庭回線なら通常 wsl --install で 数十MB/s 出るはず。
+2. 並列8で3倍に伸びたが頭打ち（10Mbps前後）→ これも **公開URLの総帯域シェーピング**の典型パターン。本物のCDNなら100Mbps以上余裕で出ます。
+3. Defender は犯人ではない（仮にDefender影響なら並列化でこんなに伸びない、CPU側のボトルネックになる）。
+
+つまり Cloudflare の公式ドキュメントどおり「**`r2.dev` は開発用、本番配布には使うな**」が現実に出ています。
+
+## 推奨対策（効果順）
+
+### 1. 配信先を変える（最重要・効果大）
+- **A案: Cloudflare R2 + カスタムドメイン + Cache Rules**  
+  自分のドメイン（例: `dl.example.com`）をR2バケットにバインドし、Cache Rules で `Cache-Control: public, max-age=31536000, immutable` を付ける。これで初回MISSさえ越えればCloudflare CDNが効き、エッジから配信。レート制限なし。これが本筋。
+- **B案: GitHub Releases にアセットとして上げる**  
+  Fastly CDN経由で世界中に高速配信。2GB制限あり（後述の圧縮で収まる可能性大）。無料・即日。**手っ取り早く効果絶大**。
+- **C案: Cloudflare Pages / R2 + Workers** で署名URL配布（やや手間）
+
+### 2. tarを圧縮する（効果中・必須レベル）
+- 2.81GB の生tar → **zstd で 30-50%、gzip で 50-70%** に縮みます。
+- WSL `wsl --import` は **gzip圧縮されたtar.gz をそのまま受け取れる**（拡張子は .tar でもOK、中身がgzipなら自動判定）。実質ノーコストでDL量半減。
+- zstdならさらに小さく速いが、`--import` の対応バージョン確認が必要。まずはgzipが安全。
+- 1GB前後まで縮めば GitHub Releases (2GB制限) にも乗ります。
+
+### 3. インストーラのDL実装を差し替える（効果中）
+- `aria2c.exe`（約3MB）をインストーラに同梱し、`-x 8 -s 8 -k 1M` で並列DL+レジューム。
+- 配信先をカスタムドメイン化すれば、aria2c なしでも十分速くなるので、優先度は2番目。
+
+## 個人的なおすすめ手順
+
+1. **まず GitHub Releases に上げてみる**（gzip圧縮して1GB前後にする）。それだけで多くのユーザーが10倍速くなる可能性大。検証も即できる。
+2. 並行して Cloudflare R2 のカスタムドメイン設定を進める（こちらが本命の本番構成）。
+3. インストーラの DL 実装は最後。配信側が直れば既存の Inno DownloadPage でも実用速度が出る可能性あり。
+
+## 今のDLは？
+
+aria2cで 10Mbps なら ETA 36分。**待つ価値はないので中止推奨**。配信側を直してから再ビルド・再DLが結局速いです。
+
+User: もともとGithubにあげたかったのですが、GBのファイルをアップできないかと思って、安そうなR2にしました。R2+独自ドメイン取得（ドメイン維持費）とCloudFront S3 独自ドメインとGithub(GB扱えるオプション？)のどれがいいかな？
+
+GitHub Copilot: ## 3案の比較
+
+### 前提整理
+- ファイル: 2.81GB（gzip圧縮で **1.0～1.4GB** 程度に縮む想定）
+- 用途: インストーラからの公開DL（認証不要）
+- 想定DL頻度: 不明だが、仮に **月100DL × 1.2GB = 120GB/月** で試算
+
+---
+
+### A案: Cloudflare R2 + カスタムドメイン
+
+| 項目 | 内容 |
+|---|---|
+| 保管料 | $0.015/GB/月 → 3GB で **約$0.05/月（ほぼ0円）** |
+| 帯域 | **エグレス無料**（R2の最大の売り） |
+| リクエスト | Class B（GET）100万req $0.36 |
+| ドメイン費 | `.com` で年$10前後 = **月$1程度**、`.dev` `.app` も同程度。Cloudflare Registrar は原価販売で安い |
+| CDN | Cloudflare CDN（Cache Rules設定で自動）、東京エッジあり、速い |
+| 設定難易度 | カスタムドメインをR2バケットに紐付けるだけ。10分 |
+| **月額目安** | **約$1（ドメイン代のみ）** |
+
+**特徴**: エグレス無料が効くので、DLが増えても**料金がほぼ変わらない**。長期運用に最強。
+
+---
+
+### B案: AWS CloudFront + S3 + 独自ドメイン
+
+| 項目 | 内容 |
+|---|---|
+| S3保管料 | $0.025/GB/月 → 3GB で **約$0.08/月** |
+| CloudFront 帯域 | 日本リージョン $0.114/GB（最初の10TB）、最初の1TB/月は無料枠あり |
+| リクエスト | HTTPSリクエスト $0.012/10000 |
+| ドメイン費 | Route53 ホストゾーン $0.50/月 + ドメイン年$12～ = **月約$1.5** |
+| ACM証明書 | 無料 |
+| CDN | CloudFront、世界トップクラスで速い |
+| 設定難易度 | OAC / OAI、ACM(us-east-1)、Route53、CloudFront、ディストリビューション...で初心者は半日コース |
+| **月額目安** | 月100DL なら **約$1.5～2**（無料枠で帯域実質0円）。月1000DL（1.2TB）なら **約$25** |
+
+**特徴**: 帯域従量課金なので**DLが増えると一気に高くなる**。AWSをすでに使っているなら統合は楽。
+
+---
+
+### C案: GitHub Releases
+
+| 項目 | 内容 |
+|---|---|
+| 料金 | **完全無料** |
+| ファイルサイズ上限 | **1ファイル2GB**（GitHub公式制限、有料プランでも変わらず） |
+| 帯域制限 | 公式には明記なし、実質無制限。Fastly CDN経由 |
+| ドメイン | github.com のまま（独自ドメイン不可） |
+| CDN | Fastly、十分速い（数十MB/s出る） |
+| 設定難易度 | `gh release create v1.0 file.tar.gz` の1コマンド |
+| **月額** | **0円** |
+
+**特徴**: gzip圧縮で2GB以下に収まれば**これ一択レベル**で安い・速い・楽。Git LFSは別物（こちらは帯域課金あり、要注意）。
+
+---
+
+## 推奨
+
+### 短期: **C案 GitHub Releases（無料）**
+2.81GB → gzip圧縮して **1.0～1.4GB** に縮めれば **2GB制限内**に収まる可能性が高い。  
+- まず `gzip -9 homepage-v2-latest.tar` で実測サイズを確認。
+- 収まれば即運用開始。コスト0、速度十分、運用ゼロ手間。
+- インストーラのバージョン管理もタグで自然にできる（`v1.2.3` のリリースから固定URLでDL可）。
+
+### 中長期: **A案 Cloudflare R2 + カスタムドメイン（月$1）**
+- 将来ファイルが2GBを超えたり、複数のtarを配布する場合に移行。
+- ドメインは1つ取れば他の用途（メール、サイト）にも使い回せるので、**実質ドメイン代だけ**。
+- エグレス無料なので、DLが何倍になっても料金は固定。
+
+### 非推奨: **B案 CloudFront+S3**
+- 帯域従量課金なので、配布物がバズったときに**請求事故リスク**あり（DDoS的なアクセスで月数万円もありえる）。
+- すでにAWS中心の構成で、IAM/CloudFormation統合のメリットがあるなら別ですが、今回は **R2のほうがシンプル＆安価**で完全に上位互換。
+
+---
+
+## 具体的な次のアクション
+
+```powershell
+# 1. tarを圧縮してサイズ確認（GitHub Releasesに乗るか判定）
+# WSL内で:
+#   gzip -9 -k homepage-v2-latest.tar
+#   ls -lh homepage-v2-latest.tar.gz
+# または7-Zipで .tar.gz を作成
+
+# 2. 2GB以下に収まる → GitHub Releases にアップ
+gh release create v1.0.0 homepage-v2-latest.tar.gz --notes "Initial release"
+
+# 3. インストーラのURLを差し替え（.iss）
+# TarUrl := 'https://github.com/<user>/<repo>/releases/download/v1.0.0/homepage-v2-latest.tar.gz';
+# wsl --import は .tar.gz をそのまま受け取れる（拡張子変えてもOK）
+```
+
+圧縮後のサイズが分かれば、次のステップを具体化できます。先に `gzip -9` でサイズだけ計測してみてください。
+
+User: 以下結果です。shaファイルは必須？その場合どう作る？
+ubuntu@DESCKTOP-MB-K700:/mnt/d/wsl_backup$ gzip -9 -k homepage-v2-latest.tar
+ubuntu@DESCKTOP-MB-K700:/mnt/d/wsl_backup$ ls -l --si
+total 78G
+-rwxrwxrwx 1 ubuntu ubuntu 3.0G May 11  2025 20250511-Ubuntu16.tar
+-rwxrwxrwx 1 ubuntu ubuntu  29G Mar 19 22:02 20260319-Ubuntu24.tar
+-rwxrwxrwx 1 ubuntu ubuntu  37G Apr 11 12:31 20260411-Ubuntu22.tar
+-rwxrwxrwx 1 ubuntu ubuntu 5.6G Apr 26 07:52 20260426-Ubuntu.tar
+-rwxrwxrwx 1 ubuntu ubuntu 3.1G Apr 26 10:21 homepage-v2-latest.tar
+-rwxrwxrwx 1 ubuntu ubuntu 1.1G Apr 26 10:21 homepage-v2-latest.tar.gz
+-rwxrwxrwx 1 ubuntu ubuntu   64 Apr 26 10:59 homepage-v2-latest.tar.sha256
+
+GitHub Copilot: ## サイズ結果
+
+- 元 tar: 3.1GB → **gzip -9 で 1.1GB**（約65%削減）。**GitHub Releases の 2GB制限内に余裕で収まります**。
+- GitHub Releases で行きましょう。
+
+## SHA256 ファイルは必須か？
+
+**必須ではないが、強く推奨**です。理由:
+
+- **DL破損検知**: 大きいファイルなのでネットワーク途中切断・キャッシュ破損が起こり得る。`wsl --import` で破損tarを食わせると分かりにくいエラーが出ます。
+- **改ざん検知**: HTTPSがあるので中間者攻撃は基本防げますが、配信元の事故（誤ったファイルを上げた等）も検知できます。
+- **インストーラの既存実装**: 現状の homepage-v2-installer.iss がすでに `.sha256` を前提にDL・検証している作りなので、廃止するとコード変更箇所が増える。**残すのが楽**。
+
+GitHub Releases自体はファイル単位のチェックサムを公開していないので、自前で `.sha256` を併置するのが定石です。
+
+## SHA256 の作り方
+
+### WSL/Linux 側（今いる場所）
+
+```bash
+cd /mnt/d/wsl_backup
+
+# gz に対してハッシュを取る（配布するのは .gz のほうなので）
+sha256sum homepage-v2-latest.tar.gz > homepage-v2-latest.tar.gz.sha256
+
+# 中身確認
+cat homepage-v2-latest.tar.gz.sha256
+# 例: 3a7bd9...e2  homepage-v2-latest.tar.gz
+```
+
+### PowerShell 側（Windowsで作る場合）
+
+```powershell
+$f = 'D:\wsl_backup\homepage-v2-latest.tar.gz'
+$hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+"$hash  $(Split-Path $f -Leaf)" | Set-Content -NoNewline "$f.sha256" -Encoding ASCII
+```
+
+## ファイル形式の注意点
+
+既存の `homepage-v2-latest.tar.sha256`（64バイト）は**おそらく `.tar` に対するハッシュ**です。**配布物を `.tar.gz` に変更するなら、ハッシュも .gz に対して取り直す必要があります**。混在すると検証失敗します。
+
+## sha256 ファイルの中身フォーマット
+
+`sha256sum` 標準形式は:
+
+```
+<64桁hex>  <ファイル名>
+```
+
+（hexと名前の間はスペース2つ）。インストーラ側の検証コードがこの形式をパースしているか、それとも先頭64桁だけ見ているかで、形式の自由度が変わります。一応見ておきましょう: 
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss#120-120), lines 120 to 188
+
+`LoadSha256FromFile` は **「先頭からスペースまでをハッシュとして取り出して小文字化」** する実装なので、`sha256sum` の標準出力フォーマット（`<hex>  <filename>`）でそのままOKです。
+
+## まとめ・次のアクション
+
+1. **配布物を .tar.gz に変更**
+   ```bash
+   # すでに作成済み
+   sha256sum homepage-v2-latest.tar.gz > homepage-v2-latest.tar.gz.sha256
+   ```
+
+2. **GitHub Releases に2ファイルをアップ**
+   ```powershell
+   # tarballの方は不要、.gzと.gz.sha256のみ
+   gh release create v1.0.0 `
+     D:\wsl_backup\homepage-v2-latest.tar.gz `
+     D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+     --notes "Initial release"
+   ```
+
+3. **インストーラ側の対応が3点必要**:
+   - URL を GitHub Releases の `https://github.com/<owner>/<repo>/releases/download/v1.0.0/homepage-v2-latest.tar.gz` 系に変更
+   - ファイル名を `.tar.gz` に変更
+   - **`wsl --import` 呼び出しが .tar.gz を受け取れるか確認**（最近のWSLは自動判定するが、古い版だと手前で `gzip -d` が要る場合あり）
+
+3点目だけ少し検証が要ります。インストーラ側のコード修正もご希望なら、続けて手を入れますがどうしますか？
+
+User: shaは作成済です。2はバージョンv2.0.0にしたいです。（本体が2.0.0なので、イントーラーのvもあわせたい）ghコマンドがないので、あなたの方で2を実施できますか？
+
+GitHub Copilot: Ran terminal command: gh --version
+Completed with input: gh --version
+
+私の側からも `gh` がなく、また仮にあっても **GitHub認証はユーザー本人のブラウザ/トークンが必要**なので、こちらだけで完結アップロードはできません。3つ選択肢があります。
+
+## 選択肢
+
+### A. `gh` CLI をインストール（推奨・以降の運用も楽）
+```powershell
+winget install --id GitHub.cli -e
+# 新しいPowerShellを開き直してから:
+gh auth login              # ブラウザでGitHub認証（1回だけ）
+gh release create v2.0.0 `
+  D:\wsl_backup\homepage-v2-latest.tar.gz `
+  D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+  --repo <owner>/<repo> `
+  --title "v2.0.0" `
+  --notes "Initial public release"
+```
+1.1GBのアップは家庭回線の上り次第ですが、`gh release create` がレジューム・大容量対応しているので最も安定。
+
+### B. ブラウザでWebアップロード（CLI不要）
+1. https://github.com/`<owner>`/`<repo>`/releases/new を開く  
+2. **Tag**: `v2.0.0`、**Release title**: `v2.0.0`  
+3. 「Attach binaries」エリアに `homepage-v2-latest.tar.gz` と `homepage-v2-latest.tar.gz.sha256` をD&D  
+4. **Publish release**  
+
+注意: WebUIは1ファイル2GB制限の運用が厳しめです。1.1GBなら問題なし。
+
+### C. PowerShell + REST API（gh不要だがやや手間）
+PATトークン作成 → `Invoke-RestMethod` でリリース作成 → アセットアップロード。スクリプト化する価値があるなら作りますが、ワンショットなら A か B が早いです。
+
+## 必要な情報
+
+どの案でも、続けてインストーラ側のURL修正をするには次が必要です:
+- **GitHubの owner/repo**（例: `okamoto/homepage-v2-installer`）
+- 公開先リポジトリは **public** ですか？（privateだとDLにトークンが要り、インストーラから素直にDLできなくなります）
+
+A案でいきますか、B案でいきますか？  
+B案で先にアップしてもらえれば、私はその間に homepage-v2-installer.iss のURL書き換え（`v2.0.0` 固定 or `latest` 参照）を準備しておきます。
+
+User: PS D:\work\homepage-v2-installer> gh release create v2.0.0 `
+>>   D:\wsl_backup\homepage-v2-latest.tar.gz `
+>>   D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+>>   --repo <owner>/<repo> `
+>>   --title "v2.0.0" `
+>>   --notes "Initial public release"
+発生場所 行:4 文字:10
++   --repo <owner>/<repo> `
++          ~
+演算子 '<' は、今後の使用のために予約されています。
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : RedirectionNotSupported
+
+GitHub Copilot: Ran terminal command: git -C d:\work\homepage-v2-installer remote -v; gh --version
+Completed with input: git -C d:\work\homepage-v2-installer remote -v; gh --version
+
+Ran terminal command: git -C d:\work\homepage-v2-installer remote -v
+
+失礼、`<owner>/<repo>` は私が書いた**プレースホルダー**でそのまま使ってはいけませんでした。あとPowerShellでは `<` `>` がリダイレクト演算子扱いでパースエラーになります。
+
+git remote から判明: **`okamoto53515606/homepage-v2-installer`**
+
+## 手順
+
+### 1. gh CLI をインストール
+```powershell
+winget install --id GitHub.cli -e --accept-package-agreements --accept-source-agreements
+```
+
+### 2. **新しいPowerShellを開き直す**（PATH反映のため必須）
+
+### 3. 認証
+```powershell
+gh auth login
+```
+対話形式で `GitHub.com` → `HTTPS` → `Login with a web browser` を選択し、表示される8桁コードをブラウザに入力。
+
+### 4. リリース作成（`<...>` を実値に置換済み）
+```powershell
+gh release create v2.0.0 `
+  D:\wsl_backup\homepage-v2-latest.tar.gz `
+  D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+  --repo okamoto53515606/homepage-v2-installer `
+  --title "v2.0.0" `
+  --notes "Initial public release"
+```
+
+完了すると、固定URLでDLできるようになります:
+```
+https://github.com/okamoto53515606/homepage-v2-installer/releases/download/v2.0.0/homepage-v2-latest.tar.gz
+https://github.com/okamoto53515606/homepage-v2-installer/releases/download/v2.0.0/homepage-v2-latest.tar.gz.sha256
+```
+
+## 確認事項
+
+このリポジトリ `okamoto53515606/homepage-v2-installer` は **public** ですか？  
+（privateだとインストーラからの匿名DLができません。Settings > General の一番下で確認できます。）
+
+publicであることを確認したらアップロードを進めてください。完了報告いただければ、続けて homepage-v2-installer.iss のURL/ファイル名を `v2.0.0` の `.tar.gz` 系に書き換えます。
+
+User: 4実行中ですので、「インストーラ側の対応が3点必要を進めてもらえますか？
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/scripts/install-wsl.ps1)
+
+WSL2 の `wsl --import` は **gzip圧縮されたtarを自動判定**で展開できるので、install-wsl.ps1 側は変更不要です。`.iss` のみ修正します。 
+
+Replacing 24 lines with 28 lines in [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+
+```
+
+```
+変更内容の確認用に最終形を確認:  
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss#1-1), lines 1 to 170
+
+修正完了です。
+
+## 変更点サマリ（homepage-v2-installer.iss のみ）
+
+| # | 内容 | 変更箇所 |
+|---|---|---|
+| 1 | `MyAppVersion` を `1.0.0` → **`2.0.0`** | 6行目 |
+| 2 | `MyReleaseTag` `MyReleaseRepo` `MyTarFileName` の3定数を新設（後で URL/タグ変更しやすく） | 11-13行目 |
+| 3 | DL先URLを R2 → **GitHub Releases v2.0.0** | NextButtonClick内 |
+| 4 | キャッシュ/一時ファイル名を `.tar` → **`.tar.gz`** | NextButtonClick内 |
+| 5 | ウィザード説明文を `約3GB / 数分〜十数分` → **`gzip圧縮済み, 約1.1GB / 数分`** | InitializeWizard |
+
+## 変更しなかった箇所と理由
+
+- **install-wsl.ps1**: 変更不要。
+  - `wsl --import` は **gzip圧縮tarを自動判定で展開**するので、ファイルが `.tar.gz` でも `.tar` でも中身がgzipなら動作します。
+  - SHA256検証も「ファイルの中身のハッシュ」なので、配布物が `.tar.gz` に変わっても今回新しく作った `.tar.gz.sha256` と整合します。
+  - スクリプト側は `-TarFile` パラメータでパスを受け取るだけなので、拡張子に依存していません。
+- **`MyDistroName`**: そのまま（WSLディストリの登録名は配布形式と無関係）。
+
+## 次のチェック項目
+
+1. **gh release 完了後** `https://github.com/okamoto53515606/homepage-v2-installer/releases/download/v2.0.0/homepage-v2-latest.tar.gz` をブラウザでアクセスして即DLが始まり、速度が出ることを確認。
+2. `ISCC.exe installer\homepage-v2-installer.iss` でビルド再生成。
+3. 既存ユーザー検証時は `%LOCALAPPDATA%\HomepageV2\cache` の古い `homepage-v2-latest.tar` / `.sha256` が残っていれば手動で削除しておくと混乱しません（`[UninstallDelete]` で消えるので、新規環境では問題なし）。
+
+Made changes.
+
+User: ありがとう。gitへの１GBアップロード完了を待ちます。buildは今まではbuild.ps1でやってましたが、その方法でいいですか？
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/build.ps1)
+
+はい、build.ps1 のままで問題ありません。今回の変更は **`.iss` の中身（URL・ファイル名・バージョン定義）だけ**で、ビルド手順自体には影響していません。
+
+```powershell
+.\build.ps1
+```
+
+これで `dist\homepage-v2-installer-setup.exe` が再生成されます。
+
+## ビルド前のチェックリスト
+- [ ] gh release `v2.0.0` のアップロード完了（`.tar.gz` と `.tar.gz.sha256` の両方）
+- [ ] 公開URLにブラウザで直接アクセスし、DLが始まること（速度感も体感確認）
+- [ ] リポジトリが **public**（private だと匿名DL不可）
+- [ ] build-exe.ps1 が動く環境（ps2exe 導入済み、Inno Setup 6 導入済み）
+
+## 動作確認の小技
+ビルド後の動作確認時、過去のキャッシュが残っているとそちらを掴む可能性があるので、テスト前に削除しておくとクリーンに確認できます:
+```powershell
+Remove-Item -Recurse -Force $env:LOCALAPPDATA\HomepageV2\cache -ErrorAction SilentlyContinue
+```
+
+アップロード完了後、build → インストール実行で **DL速度が桁違いに速くなっているはず** です。問題出たら教えてください。
+
+User: githubアップとビルドまで終わりました。このインストーラーの中でWSLイメージURLの設定https://github.com/okamoto53515606/homepage-v2-installer/releases/download/v2.0.0/homepage-v2-latest.tar.gzはどこにありますか？
+
+GitHub Copilot: homepage-v2-installer.iss の冒頭の **`#define`** で組み立てています。
+
+homepage-v2-installer.iss
+```ini
+#define MyReleaseTag    "v2.0.0"
+#define MyReleaseRepo   "okamoto53515606/homepage-v2-installer"
+#define MyTarFileName   "homepage-v2-latest.tar.gz"
+```
+
+実際にURLとして組み立てているのが `[Code]` セクション内 `NextButtonClick` の以下:
+
+homepage-v2-installer.iss
+```pascal
+TarUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}';
+ShaUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}.sha256';
+```
+
+次回バージョンを上げるときは **冒頭3定数の `MyReleaseTag` を書き換えるだけ**で済みます（必要に応じて `MyAppVersion` も合わせる）。
+
+User: なるほど、MyReleasePepoを最新(latest)にすることはできますか？（WSLは最新をとれるように）。その場合、installerのバージョンと 本体（WSLやその中身）のバージョンは分けて考えたほうがいいですかね？
+
+GitHub Copilot: ## できますか？ → はい、できます
+
+GitHub Releases には **`latest` を指す固定URL** があります:
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/<filename>
+```
+
+このURLは「最新の **non-prerelease** リリース」のアセットへ自動で302リダイレクトされます。タグ名を意識せずに常に最新を取れます。
+
+例:
+```
+https://github.com/okamoto53515606/homepage-v2-installer/releases/latest/download/homepage-v2-latest.tar.gz
+```
+
+## バージョンは分けたほうがいいか？ → **強く推奨します**
+
+理由:
+
+| 観点 | 内容 |
+|---|---|
+| **更新頻度の違い** | WSLイメージ（中身のアプリ）は頻繁に更新したい。インストーラ本体（exe生成物・トレイアプリ・スクリプト）は構造変更時しか更新したくない。 |
+| **配布物の重さ** | exeインストーラ自体は軽量（数MB）。WSLイメージは1.1GB。これらを同じバージョン番号で縛ると「軽微な中身更新でもインストーラ再配布」「インストーラのバグ修正のために中身も巻き込む」など噛み合わない。 |
+| **ユーザー体験** | 既にインストーラを入れたユーザーは、起動時にWSLイメージだけ最新化できると嬉しい（将来の自動アップデート機能の余地）。 |
+| **互換性管理** | インストーラ側がイメージのフォーマット要求（gzip対応バージョン等）を持つので、メジャー更新時のみインストーラ側も上げる、という運用が自然。 |
+
+## 推奨される命名
+
+| 種別 | 例 | 用途 |
+|---|---|---|
+| **インストーラのバージョン** | `installer-1.0.0` | exeの構造変更時のみインクリメント。Inno Setup の `MyAppVersion`。 |
+| **WSLイメージのバージョン** | `image-2.0.0`, `image-2.0.1`, ... | 中身更新時に頻繁にインクリメント。 |
+| **`latest` リリース** | 必ず最新 image を pre-release ではなく通常リリースとして公開すれば、`/releases/latest/download/...` で取得可能 |
+
+ただし**注意点**として、GitHub Releases の `latest` は **リポジトリ単位で1つ**です。インストーラとイメージを別々に「最新」管理したい場合、選択肢:
+
+1. **リポジトリを分ける**: `homepage-v2-installer`（exe配布用、めったに更新なし）と `homepage-v2-image`（WSL配布用、頻繁更新）。一番きれいだが管理対象が増える。
+2. **同じリポジトリでタグ命名規則を分ける + 取得方法を変える**: たとえばインストーラexeはタグ `installer-vX.Y.Z`、イメージはタグ `image-vX.Y.Z` でリリース。`releases/latest` はイメージ用に使い、インストーラexeは固定タグでリンクする運用。**`/releases/latest` はあくまで「最新の通常リリース」を1つだけ指すので、片方しか latest 化できません**。
+3. **API経由で動的解決**: インストーラ実行時に `https://api.github.com/repos/.../releases` を叩いてフィルタする。柔軟だが認証レート制限の注意要。
+
+## 現実的なおすすめ案
+
+**現状のまま1リポジトリ運用で、`latest` をWSLイメージ用に使う** が一番楽です:
+
+- インストーラexeは個別配布（自分のWebサイトやREADMEから固定タグの直リンクを貼る）
+- WSLイメージは `releases/latest/download/homepage-v2-latest.tar.gz` で常に最新参照
+
+将来のために修正案を出します。 
+
+## 修正案
+
+```ini
+; 配布物 (GitHub Releases) のバージョンタグ
+; 'latest' を指定すると常に最新リリースのアセットを取得します
+#define MyReleaseTag    "latest"
+#define MyReleaseRepo   "okamoto53515606/homepage-v2-installer"
+#define MyTarFileName   "homepage-v2-latest.tar.gz"
+```
+
+そしてURL組み立て箇所をパス形式の違いに対応:
+
+```pascal
+if '{#MyReleaseTag}' = 'latest' then
+begin
+  TarUrl := 'https://github.com/{#MyReleaseRepo}/releases/latest/download/{#MyTarFileName}';
+  ShaUrl := 'https://github.com/{#MyReleaseRepo}/releases/latest/download/{#MyTarFileName}.sha256';
+end
+else
+begin
+  TarUrl := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}';
+  ShaUrl := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}.sha256';
+end;
+```
+
+ただし `latest` 運用には **隠れた注意点**があります:
+
+### latest運用の落とし穴
+
+1. **インストーラexe本体に `MyAppVersion` が焼き込まれる**ので、中身だけ更新してもインストーラexeは再ビルド・再配布しないとユーザーには届かない（ユーザーが既にインストーラexeを保管していれば、再実行すると新しいイメージを取りにいく挙動になります）。
+2. **SHA256検証は配布側で更新済みである必要がある**: 新リリースを公開するときは必ず `.tar.gz.sha256` も同じリリースに同梱すること。片方だけ更新するとインストーラが壊れる。
+3. **古いインストーラexeで新しいイメージが取れてしまう**: 将来イメージ形式に破壊的変更（例: zstd採用）を入れた時、古いインストーラexeがそれを処理できずに失敗する。
+   - 対策: イメージ側に「最低必要なインストーラバージョン」を入れたバージョンファイル（manifest.json的なもの）を別アセットで配り、インストーラ起動時に確認する。今は不要だが将来の拡張余地として認識しておけばOK。
+
+## まとめ・あなたへの問い
+
+- **latest化の修正、入れますか？** （上記の修正パターン適用）
+- **インストーラ本体は今 `MyAppVersion = 2.0.0` ですが、これは「インストーラexeのバージョン」として独立管理する方針でいいですか？** 例えば次回WSLイメージだけ更新するときは、`MyAppVersion` は 2.0.0 のまま据え置き、リリースタグだけ `image-2.1.0` にする、など。
+
+方針確認できれば、`.iss` を一気に書き換えます。
+
+User: ①WSLイメージはhomepage本体のリポジトリhttps://github.com/okamoto53515606/homepageにおく（ここはhomepage本体のバージョン）②インストーラは今のインストーラー用レポでv1.0.x 。この案どうでしょう？(installerはレポジトリ分けたい気が、私的に歯)
+
+GitHub Copilot: ## 評価: **とても良い案です**
+
+理由:
+
+| 観点 | この分離案のメリット |
+|---|---|
+| **リポジトリの責務が明確** | `homepage`=アプリ本体（中身、運用）、`homepage-v2-installer`=配布手段（exe、Inno Setup）。コミット履歴も別管理になり追いやすい。 |
+| **バージョン体系が独立** | 本体は `v2.0.0`, `v2.1.0`... と機能更新で進む。インストーラは `v1.0.0`, `v1.0.1`... と配布まわりのバグ修正で進む。両者のリリースタイミングが噛み合わなくてよい。 |
+| **`releases/latest` が両方で使える** | それぞれのリポで「最新」を1つずつ持てる。本体側 `releases/latest/download/homepage-v2-latest.tar.gz` を取りに行く構成にできる。これが大きい。 |
+| **権限管理** | 将来コラボレータを増やすとき、本体だけ触らせる/インストーラだけ触らせる、が自然にできる。 |
+| **CI/CD分離** | 本体側で WSL イメージビルド → リリース、を自動化しやすい。インストーラ側は Inno Setup のビルドだけに専念。 |
+
+デメリットは「リリース手順が2か所に分かれる」程度で、運用ルール（例: 本体リリース時にインストーラの最低必要バージョンを記載する）を決めれば吸収可能です。
+
+## バージョン規約の提案
+
+| 項目 | 値 | ルール |
+|---|---|---|
+| **本体（homepage）リリースタグ** | `v2.0.0`, `v2.1.0`, ... | 中身（アプリ機能・WSLイメージ内コード）のセマンティックバージョニング |
+| **本体配布アセット名** | `homepage-v2-latest.tar.gz` + `.sha256` | ファイル名は固定（latest URL でDLするため） |
+| **インストーラリリースタグ** | `installer-v1.0.0`, `installer-v1.0.1`, ... | exe生成物・Inno Setup・トレイアプリの修正で進む |
+| **インストーラ配布アセット名** | `homepage-v2-installer-setup.exe` | Webサイト/READMEからリンク配布 |
+
+## 修正後のURL設計
+
+```
+WSLイメージ取得 (常に最新):
+  https://github.com/okamoto53515606/homepage/releases/latest/download/homepage-v2-latest.tar.gz
+  https://github.com/okamoto53515606/homepage/releases/latest/download/homepage-v2-latest.tar.gz.sha256
+
+インストーラexe配布 (固定タグ or latest):
+  https://github.com/okamoto53515606/homepage-v2-installer/releases/latest/download/homepage-v2-installer-setup.exe
+```
+
+## 実装変更点
+
+`.iss` を変更して:
+- `MyAppVersion` を **`1.0.0`**（インストーラ独自系列、「installer-」プレフィックスは内部表示には載せず、タグだけに付ける）
+- `MyReleaseRepo` を **`okamoto53515606/homepage`**（本体リポへ）
+- `MyReleaseTag` を **`latest`** にして、本体側の最新リリースを常に追従
+
+修正案、適用していいですか？  
+適用するなら次の作業フローになります:
+
+## 作業フロー
+
+1. **本体リポ `homepage` に新リリース作成**  
+   ```powershell
+   gh release create v2.0.0 `
+     D:\wsl_backup\homepage-v2-latest.tar.gz `
+     D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+     --repo okamoto53515606/homepage `
+     --title "v2.0.0" `
+     --notes "Initial release"
+   ```
+   （アップロード再度1.1GB、再アップ必要）
+
+2. **インストーラリポ側の `v2.0.0` リリースは削除 or リネーム推奨**  
+   こちらに置きっぱなしだと混乱の元。`gh release delete v2.0.0 --repo okamoto53515606/homepage-v2-installer --cleanup-tag` で消せます（タグもまとめて削除）。
+
+3. **`.iss` 修正**（私が実施）
+
+4. **build.ps1 で再ビルド**
+
+5. **インストーラexeのリリースを `installer-v1.0.0` でアップ**  
+   ```powershell
+   gh release create installer-v1.0.0 `
+     D:\work\homepage-v2-installer\dist\homepage-v2-installer-setup.exe `
+     --repo okamoto53515606/homepage-v2-installer `
+     --title "Installer v1.0.0" `
+     --notes "Initial installer release"
+   ```
+
+## 確認事項
+
+- 上記タグ命名（`installer-v1.0.0` プレフィックス付き）でOKですか？それともインストーラリポ側は単に `v1.0.0` でも違和感ないので、シンプルに `v1.0.0` でいきますか？私のおすすめは **シンプルに `v1.0.0`**（リポが分かれているので衝突しない、READMEのバッジも素直）。
+- `MyAppVersion` は **`1.0.0`** にリセットでいいですか？（インストーラ自体は新規系列の出発点）
+
+OKもらえれば `.iss` 修正と、本体リポへの再アップ手順をすぐ進めます。
+
+User: 確認事項は推奨でOKです。すすめて、git push間でお願いします。今本体homepageリポにアップロード中です。PS D:\work\homepage-v2-installer> gh release create v2.0.0 `
+>>    D:\wsl_backup\homepage-v2-latest.tar.gz `
+>>    D:\wsl_backup\homepage-v2-latest.tar.gz.sha256 `
+>>    --repo okamoto53515606/homepage `
+>>    --title "v2.0.0" `
+>>    --notes "homepage-v2をリリースしました！"
+
+GitHub Copilot: Replacing 13 lines with 19 lines in [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+
+```
+
+```
+
+
+Ran terminal command: git status; git diff --stat
+
+Ran terminal command: git add installer/homepage-v2-installer.iss; git commit -m "installer: switch download to homepage repo's latest release; reset installer version to 1.0.0"
+
+Ran terminal command: git push origin main
+
+完了しました。
+
+## 実施内容
+
+### `.iss` の変更
+- `MyAppVersion` を `2.0.0` → **`1.0.0`**（インストーラ独自系列の出発点）
+- `MyReleaseRepo` を `homepage-v2-installer` → **`okamoto53515606/homepage`**（本体リポへ向ける）
+- `MyReleaseTag` を `v2.0.0` → **`latest`**
+- URL組立てを `#if MyReleaseTag == "latest"` で分岐し、`releases/latest/download/...` 形式と固定タグ形式の両対応に
+
+homepage-v2-installer.iss
+
+### Git
+- コミット `17086c3`: `installer: switch download to homepage repo's latest release; reset installer version to 1.0.0`
+- `origin/main` に push 済み
+- 未コミットの WSL2作成メモ.txt はあなたの編集中ファイルとみなし、**そのまま残しています**（必要に応じて手動でcommit/discard）
+
+## 次の作業（あなた側）
+
+本体リポ `homepage` への 1.1GB アップロード完了後の手順:
+
+```powershell
+# 1. (任意) インストーラリポに残った v2.0.0 リリース＆タグを掃除
+gh release delete v2.0.0 --repo okamoto53515606/homepage-v2-installer --cleanup-tag --yes
+
+# 2. インストーラ再ビルド
+cd D:\work\homepage-v2-installer
+.\build.ps1
+
+# 3. インストーラの v1.0.0 リリース作成
+gh release create v1.0.0 `
+  D:\work\homepage-v2-installer\dist\homepage-v2-installer-setup.exe `
+  --repo okamoto53515606/homepage-v2-installer `
+  --title "Installer v1.0.0" `
+  --notes "Initial installer release. Downloads WSL image from homepage repo's latest release."
+```
+
+## 動作確認時のポイント
+- 本体リポ `homepage` の v2.0.0 が `Set as the latest release` になっていること（`gh release view --repo okamoto53515606/homepage` で `isLatest: true` になっていればOK）
+- ブラウザで以下を開いてDLが始まる確認:
+  - `https://github.com/okamoto53515606/homepage/releases/latest/download/homepage-v2-latest.tar.gz.sha256`
+  - `https://github.com/okamoto53515606/homepage/releases/latest/download/homepage-v2-latest.tar.gz`
+
+問題あれば教えてください。
+
+Made changes.
+
+User: ありがとう。２点質問です。インストーラの方のリリースはgithubのWEB画面からでもよいですか？２MB程度なので。.exeでも大丈夫ですか？zipとかにしないと警告にならないですかね？（実行ファイルなので）。
+
+GitHub Copilot: ## ① WebUIでのリリース作成 → **問題なし**
+
+2MB程度なら gh CLI を使う必要は全くありません。`https://github.com/okamoto53515606/homepage-v2-installer/releases/new` から:
+
+1. **Choose a tag**: `v1.0.0` を新規作成
+2. **Release title**: `Installer v1.0.0`
+3. **Description**: 任意（「Initial installer release」など）
+4. **Attach binaries**: homepage-v2-installer-setup.exe をD&D
+5. **Set as the latest release** にチェック（既定でON）
+6. **Publish release**
+
+## ② .exe をそのままアップ → **大丈夫、ただし警告は出ます**
+
+GitHub Releases に `.exe` をアップロードすること自体は完全にOK（多くのOSSプロジェクトが同じやり方）。ただし**警告問題は配布形式とは別の話**です:
+
+### 警告が出る本当の理由
+**コード署名（Authenticode署名）がないから**です。zip にしても**警告は消えません**。むしろ:
+
+| 配布形式 | DL時の挙動 | 実行時の挙動 |
+|---|---|---|
+| **`.exe` 裸** | ブラウザによっては「危険なファイル」警告が出る場合あり（Chrome/Edge） | SmartScreen の **「WindowsによってPCが保護されました」**画面（"Run anyway"が必要） |
+| **`.zip` に入れる** | DL時の警告は出にくい（中身を判定しないブラウザが多い） | 解凍後の.exe実行時は **同じSmartScreen警告**が出る（mark-of-the-web引き継ぎ） |
+| **コード署名付き`.exe`** | 警告ほぼなし | 署名検証OK→警告なし（EV証明書なら即時、OV証明書はreputation蓄積後に消える） |
+
+つまり**zip化はDLの一手間を減らすかもしれないが、SmartScreen警告は消えない**。むしろzip→解凍の手順がユーザーに面倒なだけです。
+
+### 現実的な判断
+
+**`.exe` のまま配布で問題なし**、というのが私の推奨です。理由:
+
+1. SmartScreen警告は署名がない限り避けられないので、形式変更で頑張っても効果薄。
+2. ユーザーは「詳細情報 → 実行」でクリアできる。READMEに案内を書けば十分。
+3. zip化すると、ユーザーに「右クリック → プロパティ → ブロック解除」を案内する必要が出るケースもあり、むしろ手数が増える可能性。
+4. 多くの著名OSS（Inno Setup自体、7-Zip、Notepad++など）も裸の `.exe` で配布しています。
+
+### 警告を本当に消したい場合の選択肢
+
+- **コード署名証明書を購入**: OV証明書（年$100~200）かEV証明書（年$300~600）。SmartScreenを即時クリアしたいならEV。個人配布だと過剰投資なことが多い。
+- **Microsoft Store**: 審査必要だが署名・配布が無料。ただし WSL のtar取り込みのような特権操作はストアアプリのサンドボックスから難しい。
+- **winget manifest 登録**: コミュニティから信頼を獲得すればSmartScreenが緩和されることがある。ただし即効性なし。
+
+## 推奨アクション
+
+1. **WebUIで `v1.0.0` リリース作成、`.exe` をそのまま添付**
+2. **READMEに以下を追記**しておくとサポート工数が減ります:
+   ```markdown
+   ## SmartScreen 警告について
+   このインストーラはコード署名されていないため、初回実行時に
+   「WindowsによってPCが保護されました」という青い画面が表示されます。
+   「詳細情報」をクリックし、「実行」を選択してください。
+   ```
+3. （将来）配布数が増えたら署名導入を検討
