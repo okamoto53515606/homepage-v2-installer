@@ -8,6 +8,11 @@
 #define MyAppPublisher  "homepage-v2"
 #define MyAppExeName    "HomepageV2Tray.exe"
 #define MyDistroName    "homepage-v2-latest"
+; 配布物 (GitHub Releases) のタグ・リポジトリ・ファイル名
+; MyReleaseTag に 'latest' を指定すると、本体リポ (homepage) の最新リリースを参照します
+#define MyReleaseTag    "latest"
+#define MyReleaseRepo   "okamoto53515606/homepage"
+#define MyTarFileName   "homepage-v2-latest.tar.gz"
 
 [Setup]
 AppId={{B5D7F7C2-7F1F-4F2D-9B6F-HOMEPAGEV2INST}
@@ -101,7 +106,7 @@ procedure InitializeWizard;
 begin
   DownloadPage := CreateDownloadPage(
     'WSL イメージのダウンロード',
-    'homepage-v2 用の WSL2 イメージ (約3GB) をダウンロードしています。回線速度により数分〜十数分かかります。',
+    'homepage-v2 用の WSL2 イメージ (gzip圧縮済み, 約1.1GB) をダウンロードしています。回線速度により数分かかります。',
     @OnDownloadProgress);
 end;
 
@@ -135,21 +140,26 @@ begin
       MsgBox('キャッシュフォルダを作成できません: ' + CacheDir, mbError, MB_OK);
       Result := False; Exit;
     end;
-    TarPath := CacheDir + '\homepage-v2-latest.tar';
-    ShaPath := CacheDir + '\homepage-v2-latest.tar.sha256';
-    TarUrl  := 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar';
-    ShaUrl  := 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar.sha256';
+    TarPath := CacheDir + '\{#MyTarFileName}';
+    ShaPath := CacheDir + '\{#MyTarFileName}.sha256';
+#if MyReleaseTag == "latest"
+    TarUrl  := 'https://github.com/{#MyReleaseRepo}/releases/latest/download/{#MyTarFileName}';
+    ShaUrl  := 'https://github.com/{#MyReleaseRepo}/releases/latest/download/{#MyTarFileName}.sha256';
+#else
+    TarUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}';
+    ShaUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}.sha256';
+#endif
 
     DownloadPage.Clear;
-    DownloadPage.Add(ShaUrl, 'homepage-v2-latest.tar.sha256', '');
-    DownloadPage.Add(TarUrl, 'homepage-v2-latest.tar', '');
+    DownloadPage.Add(ShaUrl, '{#MyTarFileName}.sha256', '');
+    DownloadPage.Add(TarUrl, '{#MyTarFileName}', '');
     DownloadPage.Show;
     try
       try
         DownloadPage.Download;
         // CreateDownloadPage は {tmp} に保存するため、キャッシュへコピー
-        FileCopy(ExpandConstant('{tmp}\homepage-v2-latest.tar.sha256'), ShaPath, False);
-        FileCopy(ExpandConstant('{tmp}\homepage-v2-latest.tar'), TarPath, False);
+        FileCopy(ExpandConstant('{tmp}\{#MyTarFileName}.sha256'), ShaPath, False);
+        FileCopy(ExpandConstant('{tmp}\{#MyTarFileName}'), TarPath, False);
         CachedTarPath := TarPath;
         CachedSha256  := LoadSha256FromFile(ShaPath);
         if Length(CachedSha256) <> 64 then
