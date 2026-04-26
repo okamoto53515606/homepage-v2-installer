@@ -84,6 +84,7 @@ var
   DownloadPage: TDownloadWizardPage;
   CachedTarPath: String;
   CachedSha256: String;
+  WslWasAutoInstalled: Boolean;
 
 function GetTarPath(Param: String): String;
 begin
@@ -129,7 +130,8 @@ end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  CacheDir, TarPath, ShaPath, TarUrl, ShaUrl: String;
+  CacheDir, TarPath, ShaPath, TarUrl, ShaUrl, CachedHash: String;
+  UseCache: Boolean;
 begin
   Result := True;
   if CurPageID = wpReady then
@@ -149,6 +151,26 @@ begin
     TarUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}';
     ShaUrl  := 'https://github.com/{#MyReleaseRepo}/releases/download/{#MyReleaseTag}/{#MyTarFileName}.sha256';
 #endif
+
+    // --- キャッシュ再利用判定 -------------------------------------------------
+    // tar と sha256 の両方が存在し、sha256 ファイル形式が正常であればダウンロードをスキップする
+    // (実 SHA 検証は install-wsl.ps1 が行うため、ここでは形式検証のみ)
+    UseCache := False;
+    if FileExists(TarPath) and FileExists(ShaPath) then
+    begin
+      CachedHash := LoadSha256FromFile(ShaPath);
+      if Length(CachedHash) = 64 then
+      begin
+        Log('Cache hit: reuse ' + TarPath);
+        CachedTarPath := TarPath;
+        CachedSha256  := CachedHash;
+        UseCache := True;
+      end
+      else
+        Log('Cache sha256 file invalid; will re-download');
+    end;
+
+    if UseCache then Exit;
 
     DownloadPage.Clear;
     DownloadPage.Add(ShaUrl, '{#MyTarFileName}.sha256', '');
@@ -180,18 +202,83 @@ begin
   end;
 end;
 
-function InitializeSetup(): Boolean;
+function IsWslAvailable(): Boolean;
 var
   ResultCode: Integer;
 begin
-  Result := True;
-  // wsl.exe の存在を簡易チェック
-  if not Exec('wsl.exe', '--status', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // wsl.exe --status が成功 (ExitCode=0) なら WSL2 利用可能と判定
+  Result := False;
+  if Exec('wsl.exe', '--status', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 0);
+end;
+
+function TryInstallWsl(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if MsgBox(
+      'WSL2 がインストールされていません。' + #13#10 +
+      '今すぐ自動でインストールしますか?' + #13#10 + #13#10 +
+      '・UAC (管理者の確認) ダイアログが表示されます' + #13#10 +
+      '・所要時間は 1〜3 分程度です' + #13#10 +
+      '・通常は再起動不要ですが、環境によっては再起動が必要になる場合があります',
+      mbConfirmation, MB_YESNO) = IDNO then
+    Exit;
+
+  // ShellExec の 'runas' 動詞で UAC 昇格して wsl --install を実行
+  // --no-distribution: 既定の Ubuntu を入れず、WSL ランタイムのみ導入
+  if not ShellExec('runas', 'wsl.exe',
+      '--install --no-distribution', '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
   begin
-    if MsgBox('WSL が見つかりません。' + #13#10 +
-              '管理者 PowerShell で `wsl --install` を実行し、PC を再起動してから本インストーラを再実行してください。' + #13#10 + #13#10 +
-              'このまま続行しますか？',
-              mbConfirmation, MB_YESNO) = IDNO then
-      Result := False;
+    MsgBox(
+      'WSL のインストールを起動できませんでした (UAC キャンセル等)。' + #13#10 +
+      '管理者 PowerShell で `wsl --install` を手動実行してから再試行してください。',
+      mbError, MB_OK);
+    Exit;
+  end;
+
+  if ResultCode <> 0 then
+  begin
+    MsgBox(
+      'WSL のインストールが失敗しました (ExitCode=' + IntToStr(ResultCode) + ')。' + #13#10 +
+      '管理者 PowerShell で `wsl --install` を手動実行してから再試行してください。',
+      mbError, MB_OK);
+    Exit;
+  end;
+
+  // インストール直後の状態確認
+  if IsWslAvailable() then
+  begin
+    WslWasAutoInstalled := True;
+    Result := True;
+    Exit;
+  end;
+
+  // 再起動が必要なケース (Virtual Machine Platform 等の機能初有効化時)
+  MsgBox(
+    'WSL のインストールは完了しましたが、有効化のために PC の再起動が必要です。' + #13#10 +
+    '再起動後、改めて本インストーラを実行してください。',
+    mbInformation, MB_OK);
+end;
+
+function NeedRestart(): Boolean;
+begin
+  // 自動インストール経由で WSL を入れた場合は、万全を期して再起動を推奨する
+  // (完了画面に「今すぐ再起動 / 後で手動で再起動」のラジオが表示される)
+  Result := WslWasAutoInstalled;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  WslWasAutoInstalled := False;
+  if IsWslAvailable() then Exit;
+
+  // WSL2 未導入 → 自動インストールを試行
+  if not TryInstallWsl() then
+  begin
+    Result := False;
+    Exit;
   end;
 end;

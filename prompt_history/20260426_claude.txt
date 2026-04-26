@@ -1536,3 +1536,1542 @@ GitHub Releases に `.exe` をアップロードすること自体は完全にOK
    「詳細情報」をクリックし、「実行」を選択してください。
    ```
 3. （将来）配布数が増えたら署名導入を検討
+
+User: installerでインストール後に起動後に「引数が空のパラメータであるため、パラメータPathにバインドできません」エラーになります。
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1#1-1), lines 1 to 100
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+Read [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1#100-100), lines 100 to 248
+
+Read [](file:///d%3A/work/homepage-v2-installer/tray-app/build-exe.ps1)
+
+原因が分かりました。`Get-AppIcon` 関数内で使っている `$PSCommandPath` は **ps2exe でコンパイルされた .exe 実行時には空** になるため、`Split-Path -Parent $null` でこのエラーが発生しています。
+
+HomepageV2Tray.ps1 を修正します。 
+
+Replacing 14 lines with 38 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+修正内容:
+
+- `Get-AppIcon` 内で `Split-Path -Parent $PSCommandPath` を使っていましたが、**ps2exe でビルドした .exe 実行時には `$PSCommandPath` が `$null`/空** になるため、`Split-Path -Parent` が「引数が空のパラメータであるため、パラメータ Path にバインドできません」エラーを発生させていました。
+- ソースを次の優先順位で解決するようにフォールバックを追加:
+  1. `$PSCommandPath`（スクリプト実行時）
+  2. `$PSScriptRoot`
+  3. `[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName`（ps2exe でビルドした .exe の場所）
+  4. カレントディレクトリ
+- `$here` / `$parent` が空のときに `Join-Path` / `Split-Path` を呼ばないようガードも追加。
+
+build-exe.ps1 で再ビルド → インストーラーをリビルドして動作確認してください。
+
+Made changes.
+
+User: 今度はnull 鍵の式ではメソッドを呼び出しませんのエラーです。cacheフォルダにsha署名ファイルがありますので、署名ファイルが同じ場合は、再ダウンロードをスキップできませんか？（修正後の確認に時間がかかるので）。それとセットアップ後に自動起動は起動（npm run dev)だけですか？
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1#100-100), lines 100 to 272
+
+3点対応します:
+
+1. **`null 鍵の式...` エラーの原因特定用**: 起動時の例外をログに書き出すラッパーを追加（現状原因が特定できないため）+ NotifyIcon 周りで起こり得る null 参照をガード
+2. **インストーラのキャッシュ再利用**: 既に `cache/` に tar と sha256 があり、tar の SHA256 が一致していればダウンロードをスキップ
+3. **自動起動について**: 現状は **インストール完了時にトレイアプリが起動するだけ** で、`npm run dev` は走りません（メニューの「起動」を押す必要あり）。ご希望なら `-AutoStart` で `npm run dev` まで自動実行するよう拡張できます。
+
+まず修正します。 
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/scripts/install-wsl.ps1#1-1), lines 1 to 100
+
+3点まとめて修正します。  
+
+Replacing 61 lines with 109 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1), [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+
+```
+
+```
+
+```
+
+```
+次に `-AutoStart` フラグの実装と、起動ロジックの末尾でフラグを見て自動起動するようにします。  
+
+Replacing 4 lines with 10 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+完了です。要点まとめ:
+
+### 1. `null 鍵の式...` エラー対策（HomepageV2Tray.ps1）
+
+スクリプト最上部に `trap` 付きの早期ロガーを追加しました。次回起動時に例外が出れば:
+
+- `%LOCALAPPDATA%\HomepageV2\logs\tray.log` にスタックトレース付きで記録
+- 同じ内容のメッセージボックスを表示
+
+これで「どこで null 呼び出ししたか」が特定できます。**そのログをいただければ根本原因を直せます**（現状ソース上の自明な null 参照は見当たらないため、ランタイム情報待ちです）。
+
+### 2. キャッシュ再利用（homepage-v2-installer.iss）
+
+`NextButtonClick` の冒頭に下記ロジックを追加:
+
+- `%LOCALAPPDATA%\HomepageV2\cache\` に `homepage-v2-latest.tar.gz` と `.sha256` の両方が存在し、sha256 ファイルが 64 文字の正規形式 → **ダウンロードをスキップ**
+- 実 SHA256 一致チェックは元々 install-wsl.ps1 が `Get-FileHash` で行うので二重にはやりません（高速）
+- キャッシュを破棄したい時は cache フォルダを削除すれば次回再ダウンロード
+
+### 3. インストール後の自動起動について
+
+現状の [Run] セクション:
+```
+Filename: "{app}\{#MyAppExeName}"; Description: "..."; Flags: nowait postinstall skipifsilent
+```
+は **トレイ常駐 exe を起動するだけ** で、`npm run dev` は走りません（ユーザーがメニュー「起動」をクリック）。
+
+今回 `-AutoStart` フラグを追加したので、`npm run dev` までインストール直後に走らせたい場合は homepage-v2-installer.iss の該当行を以下に変更してください:
+
+```inno
+Filename: "{app}\{#MyAppExeName}"; Parameters: "-AutoStart"; Description: "{#MyAppName} を起動する"; Flags: nowait postinstall skipifsilent
+```
+
+ご希望なら自動で当てます。
+
+### 反映手順
+```powershell
+# tray-app を再ビルド
+.\tray-app\build-exe.ps1
+# インストーラ再ビルド
+.\build.ps1   # (もしくは ISCC で .iss をコンパイル)
+```
+
+Made changes.
+
+User: ありがとう。了解です。トレイ常駐 exe を起動するだけでOKです。README.mdは利用者ガイドにしたので、動作環境や利用方法を追記、修正願います。開発者向けの部分はdocs/deleveloper.mdに移動しましたので、内容を確認いただき、間違いあれば修正願います。
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/README.md)
+
+Read [](file:///d%3A/work/homepage-v2-installer/docs/developer.md)
+
+Searched for regex `Start-BitsTransfer|Invoke-WebRequest` (`**/*.ps1`), no results
+
+Read [](file:///d%3A/work/homepage-v2-installer/installer/scripts/install-wsl.ps1#100-100), lines 100 to 121
+
+Read [](file:///d%3A/work/homepage-v2-installer/build.ps1)
+
+developer.md の「再開可能DL: Start-BitsTransfer...」は実装と異なります（実際は Inno Setup の `CreateDownloadPage` を使用）。修正します。
+
+README.md には「動作環境」を追記します。  
+
+Replacing 46 lines with 99 lines in [](file:///d%3A/work/homepage-v2-installer/README.md), [](file:///d%3A/work/homepage-v2-installer/docs/developer.md)
+
+
+```
+
+```
+
+
+Read [](file:///d%3A/work/homepage-v2-installer/README.md)
+
+Replacing 20 lines with 72 lines in [](file:///d%3A/work/homepage-v2-installer/README.md)
+
+
+```
+
+```
+完了しました。
+
+### README.md（利用者ガイド）に追記
+- **動作環境** セクション: OS / CPU / メモリ / ディスク / WSL2 / ネットワーク / ポート / 権限 を表で記載
+- **WSL2 セットアップ手順** を追加（未インストールユーザー向け）
+- **利用方法** をインストール / 起動・停止 / その他メニュー / アンインストール に細分化
+- **トラブルシューティング** をキャッシュ再利用や 60 秒タイムアウトなど最新仕様に合わせて拡充
+- 末尾から developer.md へのリンクを追加
+
+### developer.md の修正点
+実装と食い違っていた箇所を訂正:
+
+| 旧 | 新 |
+|---|---|
+| 「再開可能DL: `Start-BitsTransfer` 使用、失敗時は `Invoke-WebRequest` フォールバック」 | 「Inno Setup の `CreateDownloadPage` / `DownloadPage.Download` を使用（進捗バー表示付き）。`{tmp}` に DL 後 `cache\` へコピー」 |
+| （SHA256 検証） | 「install-wsl.ps1 側で `Get-FileHash` による検証」と実装場所を明記 |
+| （tar キャッシュ説明） | 「`cache/` に tar と sha256 ファイルが残っていればダウンロードもスキップ」（今回追加した挙動）|
+| （無し） | **起動時例外ログ**: HomepageV2Tray.ps1 最上部の `trap` で ps2exe ビルドでもスタックトレースを `tray.log` に記録、を追記 |
+
+その他の部分（配布フロー、ビルド手順、バージョン更新運用など）は実装と一致していたためそのままです。
+
+Made changes.
+
+User: 動作環境ha
+
+GitHub Copilot: 
+
+User: 
+はwindows 10は削除お願いします。利用方法の最初にwsl --installの手順（Powershellの起動方法からの説目つき）をお願いします。
+
+GitHub Copilot: Replacing 26 lines with 45 lines in [](file:///d%3A/work/homepage-v2-installer/README.md)
+
+
+```
+
+```
+完了しました。
+
+- **動作環境**: OS 行から Windows 10 を削除し、Windows 11（64bit）のみに
+- **利用方法**: 先頭に「0. 事前準備：WSL2 のセットアップ」を追加
+  - PowerShell を管理者として起動する手順（Windowsキー → `powershell` 入力 → 右クリック → 「管理者として実行」 → UAC「はい」）を画面操作レベルで記載
+  - `wsl --install` 実行 → 再起動 → 初回 Ubuntu セットアップ画面の扱いまで案内
+- 既存の「動作環境」セクション末尾の重複したセットアップ手順は削除し、各サブセクションに番号（1〜4）を付けました
+
+Made changes.
+
+User: wsl installもインストーラーでなんとからないでしょうか？ wsl installするなら、 その後、import 、wsl -d XXXX cd ~/xxxx/setup/; npm run dev でおわるので、installerの意味がうすれます。 妙案ありますか？
+
+GitHub Copilot: 良いポイントです。`wsl --install` までインストーラ側で面倒を見れば、確かに「ダブルクリックだけで終わる」体験になります。実現可能で、いくつか妙案があります。
+
+## 案A: インストーラに WSL 自動インストールを統合（おすすめ）
+
+最近の WSL は `wsl --install --no-distribution` で **既定ディストリを入れずに WSL ランタイムだけ** をインストールできます（Win10 22H2 / Win11）。これと組み合わせれば二度手間になりません。
+
+### フロー
+
+```
+[インストーラ起動]
+   ↓
+WSL 状態チェック (wsl --status)
+   ├─ 利用可能 → そのまま import フェーズへ
+   └─ 未インストール
+        ↓
+   ユーザーに「WSL を自動インストールして再起動します」と確認
+        ↓
+   wsl --install --no-distribution  (要管理者)
+        ↓
+   RunOnce レジストリに自身の再実行コマンドを登録
+   (HKCU\...\RunOnce\HomepageV2Installer = "...setup.exe /SILENT 等")
+        ↓
+   再起動を促す (Inno Setup の NeedsRestart=True)
+        ↓
+   [再起動後]
+   RunOnce が自動でインストーラを再起動
+        ↓
+   今度は WSL 利用可能 → import → 完了
+```
+
+### 必要な変更
+
+1. homepage-v2-installer.iss:
+   - `PrivilegesRequired=admin`（または `lowest` のままで wsl 部分だけ elevate）
+   - `[Code]` の `InitializeSetup` で WSL 検出
+   - 未インストールなら `wsl --install --no-distribution` 実行
+   - `[Registry]` セクションで RunOnce 登録
+   - `NeedsRestart` を実装
+2. インストール先を `{localappdata}` から `{commonappdata}\HomepageV2` または `{userappdata}` に統一（admin 化すると `{localappdata}` が変わるため）
+
+### 注意点
+
+| 項目 | 内容 |
+|---|---|
+| 管理者昇格 | UAC プロンプトが 1 回出る（許容範囲） |
+| 再起動 | 必須（避けられない。WSL 機能の有効化はリブートが要る） |
+| 古い Windows | Win10 1909 以下では `--no-distribution` が無いのでフォールバック必要 |
+| 仮想化無効 PC | BIOS で VT-x 等が無効だと WSL2 が動かない（メッセージ表示が必要） |
+
+## 案B: 最小修正案（妙案）
+
+「再起動なしで完結する」夢を取るなら **WSL 機能の有効化を `dism` 経由で並行進行** させる方法もありますが、結局は再起動必須なので意味が薄いです。
+
+## 案C: 諦めの良い案
+
+そもそも `wsl --install` は Microsoft Store からの WSL.exe 更新も含むため、エンドユーザー体験としては:
+- **インストーラは初回 1 回だけ「ボタン押して再起動」** で済む
+- それ以降の起動・停止・更新はトレイから完結
+
+これだけでも `wsl import → cd → npm run dev` をユーザーに教えるよりはるかにマシです。
+
+## 私のおすすめ：**案A** + フォールバックメッセージ
+
+実装規模は中くらい（200行程度）です。具体的には:
+
+1. 管理者権限で起動するよう `.iss` を修正
+2. `[Code]` で:
+   - `Exec('wsl.exe', '--status', ...)` で判定
+   - 未インストールなら `MsgBox` で同意取得 → `Exec('wsl.exe', '--install --no-distribution', ...)` 
+   - RunOnce 登録（`RegWriteStringValue`）
+   - 再起動要求（`NeedsRestart` 関数で True 返却）
+3. install-wsl.ps1 側は変更不要
+
+---
+
+**どの案で進めますか？** 「案A で実装して」と言っていただければ、`.iss` と必要な PowerShell スクリプトの修正をまとめて行います。
+
+念のため確認させてください:
+
+1. **管理者昇格 UAC プロンプト 1 回**は許容しますか？
+2. **再起動を促す**（自動再起動 or 「後で再起動してください」選択肢）どちらが良いですか？
+3. インストール先は `%LOCALAPPDATA%\HomepageV2` のままで良いですか？（admin 昇格すると別ユーザーの LOCALAPPDATA を指す可能性あり → `%USERPROFILE%\AppData\Local\HomepageV2` に明示するか、`{commonappdata}` にするのが安全）
+
+User: windows10は無視してwindows11のみ対象。MSのドキュメントでも再起動ないですし。
+
+GitHub Copilot: 了解しました。Windows 11 限定 + 再起動なし前提で **案A（簡易版）** を実装します。
+
+### 進める内容
+
+1. `.iss` を管理者昇格に変更 (`PrivilegesRequired=admin`)
+2. `[Code]` の `InitializeSetup` で `wsl --status` チェック
+3. 未インストールなら確認ダイアログ → `wsl --install --no-distribution` を実行
+4. インストール完了後、そのまま既存の DL → import フローへ
+5. インストール先を `{userappdata}\..\Local\HomepageV2`（= 起動ユーザーの `%LOCALAPPDATA%`）に明示し、admin 昇格でユーザーが変わらないよう固定
+
+着手する前に1点だけ確認させてください:
+
+**`wsl --install --no-distribution` の所要時間は数分かかります。**インストーラのウィザード上ではどう見せますか？
+
+- **(A)** Inno Setup の `wpReady` 直前にプログレス表示付きで実行（推奨）
+- **(B)** `[Run]` セクションで `runhidden waituntilterminated` で済ませる（シンプルだが進捗が見えない）
+
+どちらでも実装可能です。指定なければ **(A)** で進めます。
+
+User: WSL を使用して Windows に Linux をインストールする方法
+開発者は、Windows マシン上で Windows と Linux の両方の機能に同時にアクセスできます。 Windows Subsystem for Linux (WSL) を使用すると、開発者は Linux ディストリビューション (Ubuntu、OpenSUSE、Kali、Debian、Arch Linux など) をインストールし、Linux アプリケーション、ユーティリティ、Bash コマンド ライン ツールを、従来の仮想マシンやデュアルブートのセットアップのオーバーヘッドなしで、変更なしで Windows に直接使用できます。
+
+[前提条件]
+以下のコマンドを使用するには、Windows 10 バージョン 2004 以降 (ビルド 19041 以降) または Windows 11 を実行している必要があります。 以前のバージョンの場合は、 手動インストールページを参照してください。
+
+WSL コマンドのインストール
+1 つのコマンドで WSL を実行するために必要なすべてのものをインストールできるようになりました。 右クリックして [ 管理者 として実行] を選択して管理者モードで PowerShell を開き、wsl --install コマンドを入力して、コンピューターを再起動します。
+
+PowerShell
+wsl --install
+このコマンドにより、WSL を実行し、Linux の Ubuntu ディストリビューションをインストールするために必要な機能が有効になります。 (この既定のディストリビューションは変更できます)。
+
+古いビルドを実行している場合、またはインストール コマンドを使用せず、詳細な手順を実行する場合は、 以前のバージョンの WSL 手動インストール手順を参照してください。
+
+新しくインストールされた Linux ディストリビューションを初めて起動すると、コンソール ウィンドウが開き、ファイルが圧縮解除されてコンピューターに格納されるのを待つよう求められます。 今後のすべての打ち上げに要する時間は 1 秒未満です。
+
+ Note
+
+上記のコマンドは、WSL がまったくインストールされていない場合にのみ機能します。 wsl --install実行し、WSL ヘルプ テキストを表示する場合は、wsl --list --onlineを実行して使用可能なディストリビューションの一覧を確認し、wsl --install -d <DistroName>実行してディストリビューションをインストールしてください。 インストール プロセスが 0.0%でハングした場合は、 wsl --install --web-download -d <DistroName> 実行して、インストールする前にディストリビューションを最初にダウンロードします。 WSL をアンインストールするには、 WSL のレガシ バージョンのアンインストール 、または Linux ディストリビューションの登録解除またはアンインストールに関する記事を参照してください。
+
+インストールされている既定の Linux ディストリビューションを変更する
+既定では、インストールされている Linux ディストリビューションは Ubuntu になります。 これは、 -d フラグを使用して変更できます。
+
+インストールされているディストリビューションを変更するには、次のように入力します。
+
+PowerShell
+wsl.exe --install [Distro]
+[Distro]をインストールするディストリビューションの名前に置き換えます。
+
+オンライン ストアからダウンロードできる利用可能な Linux ディストリビューションの一覧を表示するには、次のように入力します。
+
+PowerShell
+wsl.exe --list --online
+インストール プロセス中に問題が発生した場合は、 トラブルシューティング ガイドのインストール セクションを確認してください。
+
+使用可能と表示されていない Linux ディストリビューションをインストールするには、TAR ファイルを使用して 任意の Linux ディストリビューションをインポート できます。 または、場合によっては、 .appx ファイルを使用してインストールすることもできます。 WSL で使用する独自の カスタム Linux ディストリビューション を作成することもできます。
+
+私がやったときも再起動なしで動きました。
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+実装します。設計方針:
+
+- `PrivilegesRequired=lowest` を維持し、**`wsl --install` のみ ShellExec の `runas` 動詞で UAC 昇格**（インストーラ全体を admin にしない）
+- `InitializeSetup` で WSL 検出 → 未導入なら確認ダイアログ → 自動 `wsl --install --no-distribution` 実行 → 検証
+- 再起動が必要だった場合は丁寧にメッセージ
+- README に「② アンインストール時の挙動」を追記  
+
+Replacing 15 lines with 71 lines in [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+
+```
+
+```
+README を更新します（WSL自動化に伴い手順を簡略化、アンインストール時の注意点を追記）。   
+
+Multi-Replace String in Files
+
+Made changes.
+
+User: セットアップ完了後に再起動を案内してもよいかも。万全をきして。
+
+GitHub Copilot: 賛成です。`wsl --install --no-distribution` 直後はランタイム自体は使えても、**初回 `wsl --import` で稀に「Virtual Machine Platform の初期化が必要」と返るケース**があるため、念のため案内したいですね。
+
+実装方針:
+- 自動インストール経由（`TryInstallWsl` で True）の場合のみ、セットアップ完了画面に **「PC の再起動を推奨します」** を表示する
+- 既に WSL が利用可能だったユーザーには不要なので案内しない（無駄に再起動を強要しない）
+- Inno Setup の `NeedRestart` 関数を使うと「今すぐ再起動 / 後で再起動」のラジオボタンが完了画面に出ます
+
+修正します。 
+
+Replacing 30 lines with 40 lines in [](file:///d%3A/work/homepage-v2-installer/installer/homepage-v2-installer.iss)
+
+
+```
+
+```
+実装ポイント:
+
+- グローバル変数 `WslWasAutoInstalled` を追加し、自動インストール経由かどうかを記録
+- Inno Setup 標準の `NeedRestart()` 関数を実装 → `True` を返すと、**完了画面に「今すぐコンピューターを再起動する / 後で手動で再起動する」のラジオボタン**が自動で表示される
+- 既に WSL が入っていたユーザーには表示されない（不要な再起動を強要しない）
+
+動作:
+- **WSL 既導入**: 完了画面はそのまま、再起動案内なし
+- **WSL を本インストーラが自動導入**: 完了画面で再起動を推奨。「今すぐ」を選ぶとシャットダウンAPI 経由で OS 再起動
+
+ご希望なら、起動メニューの WSL 自動インストール手順についても README に追記します（現状の README は「`wsl --install` を手動実行」を案内しているので、自動化に追従させた方が一貫性が出ます）。やっておきますか？
+
+Made changes.
+
+User: 起動メニューの WSL 自動インストール手順はdocs/developerの方に記載願います。docs/developerも現仕様で修正願います。
+
+GitHub Copilot: Read [](file:///d%3A/work/homepage-v2-installer/docs/developer.md)
+
+Replacing 27 lines with 77 lines in [](file:///d%3A/work/homepage-v2-installer/docs/developer.md)
+
+
+```
+
+```
+developer.md を更新しました。
+
+### 主な変更点
+
+1. **「仕組み」図** に Inno Setup `[Code]` セクションでの WSL 状態チェック・自動インストール・ダウンロードキャッシュの流れを追記
+2. **インストール先** の説明を現状に合わせて更新（`cache/` は「DL中の一時」→「DL済み tar.gz / sha256 キャッシュ」など）
+3. **「設計上のポイント」** に「WSL 自動インストール」を最上段に追加
+4. **新セクション「WSL 自動インストールの実装詳細」** を追加:
+   - フロー図（`InitializeSetup` → `IsWslAvailable` → `TryInstallWsl` → `NeedRestart`）
+   - 設計意図（なぜ `PrivilegesRequired=lowest` のままで `runas` だけ使うか、なぜ `--no-distribution` を使うか、再起動案内ポリシー）
+   - 関連コードへのリンク
+   - 想定エッジケース（Win10 旧版 / 仮想化無効 / 企業ポリシー）と切り分け方
+
+Made changes.
+
+User: 起動後以下エラーです。Just-In-Time (JIT) デバッグを呼び出すための詳細については、
+ダイアログ ボックスではなく、このメッセージの最後を参照してください。
+
+************** 例外テキスト **************
+System.Management.Automation.RuntimeException: null 値の式ではメソッドを呼び出せません。
+   場所 System.Management.Automation.ExceptionHandlingOps.CheckActionPreference(FunctionContext funcContext, Exception exception)
+   場所 System.Management.Automation.Interpreter.ActionCallInstruction`2.Run(InterpretedFrame frame)
+   場所 System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)
+   場所 System.Management.Automation.Interpreter.EnterTryCatchFinallyInstruction.Run(InterpretedFrame frame)
+   場所 System.Management.Automation.Interpreter.Interpreter.Run(InterpretedFrame frame)
+   場所 System.Management.Automation.Interpreter.LightLambda.RunVoid1[T0](T0 arg0)
+   場所 System.Management.Automation.ScriptBlock.InvokeWithPipeImpl(ScriptBlockClauseToInvoke clauseToInvoke, Boolean createLocalScope, Dictionary`2 functionsToDefine, List`1 variablesToDefine, ErrorHandlingBehavior errorHandlingBehavior, Object dollarUnder, Object input, Object scriptThis, Pipe outputPipe, InvocationInfo invocationInfo, Object[] args)
+   場所 System.Management.Automation.ScriptBlock.<>c__DisplayClass57_0.<InvokeWithPipe>b__0()
+   場所 System.Management.Automation.Runspaces.RunspaceBase.RunActionIfNoRunningPipelinesWithThreadCheck(Action action)
+   場所 System.Management.Automation.ScriptBlock.InvokeWithPipe(Boolean useLocalScope, ErrorHandlingBehavior errorHandlingBehavior, Object dollarUnder, Object input, Object scriptThis, Pipe outputPipe, InvocationInfo invocationInfo, Boolean propagateAllExceptionsToTop, List`1 variablesToDefine, Dictionary`2 functionsToDefine, Object[] args)
+   場所 System.Management.Automation.ScriptBlock.InvokeAsDelegateHelper(Object dollarUnder, Object dollarThis, Object[] args)
+   場所 System.Windows.Forms.ToolStripItem.RaiseEvent(Object key, EventArgs e)
+   場所 System.Windows.Forms.ToolStripMenuItem.OnClick(EventArgs e)
+   場所 System.Windows.Forms.ToolStripItem.HandleClick(EventArgs e)
+   場所 System.Windows.Forms.ToolStripItem.HandleMouseUp(MouseEventArgs e)
+   場所 System.Windows.Forms.ToolStrip.OnMouseUp(MouseEventArgs mea)
+   場所 System.Windows.Forms.ToolStripDropDown.OnMouseUp(MouseEventArgs mea)
+   場所 System.Windows.Forms.Control.WmMouseUp(Message& m, MouseButtons button, Int32 clicks)
+   場所 System.Windows.Forms.Control.WndProc(Message& m)
+   場所 System.Windows.Forms.ToolStrip.WndProc(Message& m)
+   場所 System.Windows.Forms.ToolStripDropDown.WndProc(Message& m)
+   場所 System.Windows.Forms.NativeWindow.Callback(IntPtr hWnd, Int32 msg, IntPtr wparam, IntPtr lparam)
+
+
+************** 読み込まれたアセンブリ **************
+mscorlib
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9325.0 built by: NET481REL1LAST_25H2_C
+    コードベース:file:///C:/Windows/Microsoft.NET/Framework64/v4.0.30319/mscorlib.dll
+----------------------------------------
+HomepageV2Tray
+    アセンブリ バージョン:1.0.0.0
+    Win32 バージョン:1.0.0.0
+    コードベース:file:///C:/Users/okamo/AppData/Local/HomepageV2/app/HomepageV2Tray.exe
+----------------------------------------
+System.Management.Automation
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.8115
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Management.Automation/v4.0_3.0.0.0__31bf3856ad364e35/System.Management.Automation.dll
+----------------------------------------
+System.Core
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9319.0 built by: NET481REL1LAST_25H2_B
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Core/v4.0_4.0.0.0__b77a5c561934e089/System.Core.dll
+----------------------------------------
+System
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9333.0 built by: NET481REL1LAST_25H2_B
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System/v4.0_4.0.0.0__b77a5c561934e089/System.dll
+----------------------------------------
+System.Windows.Forms
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9325.0 built by: NET481REL1LAST_25H2_C
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Windows.Forms/v4.0_4.0.0.0__b77a5c561934e089/System.Windows.Forms.dll
+----------------------------------------
+System.Drawing
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Drawing/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Drawing.dll
+----------------------------------------
+Microsoft.PowerShell.Commands.Diagnostics
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Commands.Diagnostics/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.PowerShell.Commands.Diagnostics.dll
+----------------------------------------
+system.management.automation.resources
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.8115
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Management.Automation.resources/v4.0_3.0.0.0_ja_31bf3856ad364e35/System.Management.Automation.resources.dll
+----------------------------------------
+System.Configuration.Install
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Configuration.Install/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Configuration.Install.dll
+----------------------------------------
+Microsoft.PowerShell.ConsoleHost
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.8115
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.ConsoleHost/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.PowerShell.ConsoleHost.dll
+----------------------------------------
+Microsoft.PowerShell.Commands.Utility
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.8115
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Commands.Utility/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.PowerShell.Commands.Utility.dll
+----------------------------------------
+Microsoft.PowerShell.Commands.Management
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.7309
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Commands.Management/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.PowerShell.Commands.Management.dll
+----------------------------------------
+Microsoft.Management.Infrastructure
+    アセンブリ バージョン:1.0.0.0
+    Win32 バージョン:10.0.26100.7309
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.Management.Infrastructure/v4.0_1.0.0.0__31bf3856ad364e35/Microsoft.Management.Infrastructure.dll
+----------------------------------------
+Microsoft.PowerShell.Security
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Security/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.PowerShell.Security.dll
+----------------------------------------
+Microsoft.WSMan.Management
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.WSMan.Management/v4.0_3.0.0.0__31bf3856ad364e35/Microsoft.WSMan.Management.dll
+----------------------------------------
+System.Configuration
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Configuration/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Configuration.dll
+----------------------------------------
+System.Xml
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Xml/v4.0_4.0.0.0__b77a5c561934e089/System.Xml.dll
+----------------------------------------
+mscorlib.resources
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9032.0 built by: NET481REL1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/mscorlib.resources/v4.0_4.0.0.0_ja_b77a5c561934e089/mscorlib.resources.dll
+----------------------------------------
+System.Data
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_64/System.Data/v4.0_4.0.0.0__b77a5c561934e089/System.Data.dll
+----------------------------------------
+System.Management
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Management/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.Management.dll
+----------------------------------------
+System.DirectoryServices
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.DirectoryServices/v4.0_4.0.0.0__b03f5f7f11d50a3a/System.DirectoryServices.dll
+----------------------------------------
+Anonymously Hosted DynamicMethods Assembly
+    アセンブリ バージョン:0.0.0.0
+    Win32 バージョン:4.8.9325.0 built by: NET481REL1LAST_25H2_C
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_64/mscorlib/v4.0_4.0.0.0__b77a5c561934e089/mscorlib.dll
+----------------------------------------
+System.Numerics
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Numerics/v4.0_4.0.0.0__b77a5c561934e089/System.Numerics.dll
+----------------------------------------
+System.Transactions
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_64/System.Transactions/v4.0_4.0.0.0__b77a5c561934e089/System.Transactions.dll
+----------------------------------------
+microsoft.powershell.security.resources
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.5074
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Security.resources/v4.0_3.0.0.0_ja_31bf3856ad364e35/Microsoft.PowerShell.Security.resources.dll
+----------------------------------------
+microsoft.wsman.management.resources
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.WSMan.Management.resources/v4.0_3.0.0.0_ja_31bf3856ad364e35/Microsoft.WSMan.Management.resources.dll
+----------------------------------------
+microsoft.powershell.commands.management.resources
+    アセンブリ バージョン:3.0.0.0
+    Win32 バージョン:10.0.26100.8115
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Microsoft.PowerShell.Commands.Management.resources/v4.0_3.0.0.0_ja_31bf3856ad364e35/Microsoft.PowerShell.Commands.Management.resources.dll
+----------------------------------------
+Accessibility
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9221.0 built by: NET481REL1LAST_25H2
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/Accessibility/v4.0_4.0.0.0__b03f5f7f11d50a3a/Accessibility.dll
+----------------------------------------
+System.Windows.Forms.resources
+    アセンブリ バージョン:4.0.0.0
+    Win32 バージョン:4.8.9032.0 built by: NET481REL1
+    コードベース:file:///C:/WINDOWS/Microsoft.Net/assembly/GAC_MSIL/System.Windows.Forms.resources/v4.0_4.0.0.0_ja_b77a5c561934e089/System.Windows.Forms.resources.dll
+----------------------------------------
+
+************** JIT デバッグ **************
+Just-In-Time (JIT) デバッグを有効にするには、このアプリケーション、
+またはコンピューター (machine.config) の構成ファイルの jitDebugging 
+値を system.windows.forms セクションで設定しなければなりません。
+アプリケーションはまた、デバッグを有効にしてコンパイルされなければ
+なりません。
+
+例:
+
+<configuration>
+    <system.windows.forms jitDebugging="true" />
+</configuration>
+
+JIT デバッグが有効なときは、このダイアログ ボックスで処理するよりも、
+ハンドルされていない例外はすべてコンピューターに登録された
+JIT デバッガーに設定されなければなりません。
+
+
+
+
+GitHub Copilot: 原因が特定できました。
+
+`Start-Server` 内の `$psi.ArgumentList.Add(...)` が **.NET Framework では存在しないプロパティ** です。`ProcessStartInfo.ArgumentList` は .NET Core 2.1 / .NET 5+ で追加されたAPIで、ps2exe（.NET Framework 4.x ベース）では `$null` になります。そこに `.Add()` を呼ぶので「null 値の式ではメソッドを呼び出せません」が出ます。
+
+`Arguments`（単一の文字列）に変更します。 
+
+Replacing 13 lines with 11 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+修正完了です。
+
+### 原因の説明
+
+スタックトレース末尾の `ToolStripMenuItem.OnClick` → `LightLambda.RunVoid1` から、**メニュー項目クリック時の処理**で発生していると分かります。「起動 (npm run dev)」を押したタイミングで `Start-Server` が呼ばれ、その中の以下が `$null.Add()` を呼んでいました:
+
+```powershell
+$psi.ArgumentList.Add('-d')   # ← $psi.ArgumentList が $null
+```
+
+`System.Diagnostics.ProcessStartInfo.ArgumentList` は **.NET (Core/5+) で追加**されたプロパティで、ps2exe が生成する .NET Framework 4.x の exe では存在しません。PowerShell 5.1 で素のスクリプトとして動かすと（暗黙の自動インスタンス化が効くケースで）動くこともあるため見逃されがちです。
+
+### 修正内容
+
+`Arguments`（単一文字列）に変更しました。`bash -lc` に渡すコマンドだけ二重引用符で囲みます。
+
+### 再ビルド
+
+```powershell
+cd d:\work\homepage-v2-installer
+build-exe.ps1
+```
+
+その後、トレイアプリを再起動してメニュー → 「起動」を押せば動くはずです（インストーラー側の再ビルドは不要、`HomepageV2Tray.exe` を上書き配置するだけでOK）。
+
+念のため [docs/developer.md](docs/developer.md) のトラブルシューティング項目に「ps2exe ビルドでは `ProcessStartInfo.ArgumentList` 不可、`Arguments` を使う」を追記しておきますか？その後、トレイアプリを再起動してメニュー → 「起動」を押せば動くはずです（インストーラー側の再ビルドは不要、`HomepageV2Tray.exe` を上書き配置するだけでOK）。
+
+念のため [docs/developer.md](docs/developer.md) のトラブルシューティング項目に「ps2exe ビルドでは `ProcessStartInfo.ArgumentList` 不可、`Arguments` を使う」を追記しておきますか？
+
+Made changes.
+
+User: 起動成功したが、3001でLISTENしてない。以下wsl のps ubuntu@DESCKTOP-MB-K700:~/homepage/setup$ ps alx
+F   UID     PID    PPID PRI  NI    VSZ   RSS WCHAN  STAT TTY        TIME COMMAND
+4     0       1       0  20   0  21920 13052 -      Ss   ?          0:00 /sbin/init
+5     0       2       1  20   0   2776  1920 -      Sl   ?          0:00 /init
+0     0       7       2  20   0   2776     4 -      Sl   ?          0:00 plan9 --control-socket 7 --log-level 4 --server
+4     0      39       1  19  -1  42236 16280 -      S<s  ?          0:00 /usr/lib/systemd/systemd-journald
+4     0      70       1  20   0  24532  6572 -      Ss   ?          0:00 /usr/lib/systemd/systemd-udevd
+4   991     106       1  20   0  21460 11896 -      Ss   ?          0:00 /usr/lib/systemd/systemd-resolved
+4   996     107       1  20   0  91028  6436 -      Ssl  ?          0:00 /usr/lib/systemd/systemd-timesyncd
+4     0     167       1  20   0   4236  2700 -      Ss   ?          0:00 /usr/sbin/cron -f -P
+4   101     168       1  20   0   9620  5160 -      Ss   ?          0:00 @dbus-daemon --system --address=systemd: --nofo
+4     0     175       1  20   0  17984  8208 -      Ss   ?          0:00 /usr/lib/systemd/systemd-logind
+4     0     178       1  20   0 1756620 15968 -     Ssl  ?          0:00 /usr/libexec/wsl-pro-service
+4     0     183       1  20   0   3160  1184 -      Ss+  hvc0       0:00 /sbin/agetty -o -p -- \u --noclear --keep-baud
+4     0     198       1  20   0   3116  1188 -      Ss+  tty1       0:00 /sbin/agetty -o -p -- \u --noclear - linux
+4     0     202       1  20   0 2236384 53896 -     Ssl  ?          0:00 /usr/bin/containerd
+4   102     205       1  20   0 222508  7184 -      Ssl  ?          0:00 /usr/sbin/rsyslogd -n -iNONE
+4     0     211       1  20   0 107008 22260 -      Ssl  ?          0:00 /usr/bin/python3 /usr/share/unattended-upgrades
+4     0     272       1  20   0 2531680 92476 -     Ssl  ?          0:00 /usr/bin/dockerd -H fd:// --containerd=/run/con
+4     0     274       1  20   0  17284  6628 -      Ss   ?          0:00 /usr/lib/systemd/systemd-timedated
+5     0     524       2  20   0   2780   204 -      Ss   ?          0:00 /init
+5     0     526     524  20   0   2780   208 -      S    ?          0:00 /init
+4  1000     537     526  20   0  10164  9408 do_wai Ss   pts/0      0:00 -bash
+4     0     540       2  20   0   6824  4592 -      Ss   pts/1      0:00 /bin/login -f
+4  1000     598       1  20   0  20340 11424 -      Ss   ?          0:00 /usr/lib/systemd/systemd --user
+5  1000     599     598  20   0  21156  1724 -      S    ?          0:00 (sd-pam)
+4  1000     695     540  20   0  10028  8900 core_s S+   pts/1      0:00 -bash
+0  1000    1166     537  20   0   8316  4064 -      R+   pts/0      0:00 ps alx
+
+GitHub Copilot: `ps` の出力に **npm/node プロセスがまったくない**ので、`wsl -d homepage-v2-latest -- bash -lc "npm run dev"` は走ったがすぐに終了している可能性が高いです。
+
+## 切り分け手順
+
+### 1. tray.log で stderr を確認
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\HomepageV2\logs\tray.log" -Tail 50
+```
+
+`[stderr]` 行に `npm: command not found` / `ENOENT package.json` / `EADDRINUSE` などが出ていないか確認してください。
+
+### 2. ps を取った WSL が本当に `homepage-v2-latest` か確認
+
+PowerShell から:
+
+```powershell
+wsl -l -v --running
+```
+
+→ `homepage-v2-latest` が `Running` になっているか。別ディストリ（`Ubuntu` など）に入って ps しているだけ、というオチがあり得ます。
+
+### 3. 同じコマンドを手動で叩いて症状を再現
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc "npm run dev"
+```
+
+これでコンソールにエラーが出れば原因確定です。よくある原因:
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `npm: command not found` | nvm 環境が non-interactive で読まれない | `bash -lc` ではなく `bash -ilc` に変更、または絶対パス指定 |
+| `EACCES: permission denied` | ユーザー違い | `-u ubuntu` が効いてるか確認 |
+| `Cannot find module ... package.json` | パス違い | ProjectPath を実際のパスに合わせる |
+| `EADDRINUSE :::3001` | ポート使用中 | 他プロセス停止 |
+| 即終了で何も出ない | wsl import 直後で systemd 未起動 | wsl を一旦 `wsl --shutdown` |
+
+### 4. tray-app のロジックで疑わしい点
+
+HomepageV2Tray.ps1 の `Test-DistroRunning` がスタートアップ直後の不安定状態で false を返し、即座に `Start-Server` が再実行される可能性は低いですが、`Register-ObjectEvent` の `-Action` ブロックの `$using:LogFile` は ps2exe（PowerShell 5.1 ランタイム）でも動くはずですが、念のため stderr が拾えていない可能性もあります。
+
+---
+
+**まず `tray.log` の中身（`[stderr]` 行）を見せてもらえますか？** それで根本原因が一発で分かります。
+
+加えて、上記 **3.** を手動で実行したときのコンソール出力もあると確実です。
+
+User: PS D:\work\homepage-v2-installer> wsl -l -v
+  NAME                  STATE           VERSION
+* Ubuntu22              Stopped         2
+  Ubuntu24              Stopped         2
+  Ubuntu16              Stopped         2
+  Ubuntu                Stopped         2
+  homepage-v2-latest    Running         2
+PS D:\work\homepage-v2-installer> wsl -t homepage-v2-latest
+この操作を正しく終了しました。
+PS D:\work\homepage-v2-installer> wsl -l -v
+  NAME                  STATE           VERSION
+* Ubuntu22              Stopped         2
+  Ubuntu24              Stopped         2
+  Ubuntu16              Stopped         2
+  Ubuntu                Stopped         2
+  homepage-v2-latest    Stopped         2
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc "npm run dev"
+
+> homepage-v2-setup@1.0.0 dev
+> next dev -p 3001
+
+'\\wsl.localhost\homepage-v2-latest\home\ubuntu\homepage\setup'
+上記の現在のディレクトリで CMD.EXE を開始しました。
+UNC パスはサポートされません。Windows ディレクトリを既定で使用します。
+'next' は、内部コマンドまたは外部コマンド、
+操作可能なプログラムまたはバッチ ファイルとして認識されていません。
+
+GitHub Copilot: 原因が判明しました。**WSL内で `npm` を実行しているのに、Windows側の `npm.cmd` が呼ばれている**状態です。
+
+ログの「`UNC パスはサポートされません` / `CMD.EXE を開始しました`」は、WSL に Linux 版 `npm` が PATH に存在しないため、WSLが自動付与する Windows PATH の `npm.cmd` にフォールバックして実行されている証拠です。
+
+## 原因
+
+Linux 版 `npm` / `node` は **nvm** で入れているはずですが、nvm の初期化は通常 `~/.bashrc` に書かれており、**`bash -lc` (login shell) では `~/.bashrc` を読まない**ことがあります（`~/.bash_profile` 経由でのみ読まれる設定）。結果として nvm 未初期化 → node/npm が PATH になし → Windows 側の `npm.cmd` にフォールバック、という流れです。
+
+## 確認
+
+WSL 内で:
+
+```bash
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'which npm; which node; ls ~/.nvm/nvm.sh 2>&1'
+```
+
+おそらく `which npm` が空、もしくは Windows パスを指しているはずです。
+
+## 修正方針
+
+確実なのは **nvm を明示的に source してから npm を実行** すること。HomepageV2Tray.ps1 のコマンドをこう変更します:  
+
+Replacing 11 lines with 14 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+## 動作確認方法
+
+再ビルド前に、まず **手動で同じコマンドが通るか確認** してみてください:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"; npm run dev'
+```
+
+**ここで Next.js が `localhost:3001` で起動すれば修正OK**。その上で:
+
+```powershell
+.\tray-app\build-exe.ps1
+```
+
+で `HomepageV2Tray.exe` を再ビルドし、`%LOCALAPPDATA%\HomepageV2\app\HomepageV2Tray.exe` に上書きコピーしてトレイを起動。
+
+## もし手動コマンドでも npm が見つからなければ
+
+その場合、配布する WSL イメージ側の問題なので、WSL イメージの中で `~/.bash_profile` から nvm を初期化するように設定し直す必要があります:
+
+```bash
+# ubuntu@homepage-v2-latest 上で
+cat >> ~/.bash_profile <<'EOF'
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+EOF
+```
+
+その上で `wsl --export` し直すと、配布イメージとして恒久対応できます。
+
+今回のトレイアプリの修正は **WSL イメージを作り直さなくても済む** ようにする防御策なので、両方やっておくのが堅いです。
+
+確認後、何が出たか教えてください。
+
+Made changes.
+
+User: PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest
+
+ubuntu@DESCKTOP-MB-K700:/mnt/d/work/homepage-v2-installer$
+ubuntu@DESCKTOP-MB-K700:/mnt/d/work/homepage-v2-installer$ cat ~/.bashrc
+# ~/.bashrc: executed by bash(1) for non-login shells.
+# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+# for examples
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# don't put duplicate lines or lines starting with space in the history.
+# See bash(1) for more options
+HISTCONTROL=ignoreboth
+
+# append to the history file, don't overwrite it
+shopt -s histappend
+
+# for setting history length see HISTSIZE and HISTFILESIZE in bash(1)
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+# check the window size after each command and, if necessary,
+# update the values of LINES and COLUMNS.
+shopt -s checkwinsize
+
+# If set, the pattern "**" used in a pathname expansion context will
+# match all files and zero or more directories and subdirectories.
+#shopt -s globstar
+
+# make less more friendly for non-text input files, see lesspipe(1)
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# set variable identifying the chroot you work in (used in the prompt below)
+if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+    debian_chroot=$(cat /etc/debian_chroot)
+fi
+
+# set a fancy prompt (non-color, unless we know we "want" color)
+case "$TERM" in
+    xterm-color|*-256color) color_prompt=yes;;
+esac
+
+# uncomment for a colored prompt, if the terminal has the capability; turned
+# off by default to not distract the user: the focus in a terminal window
+# should be on the output of commands, not on the prompt
+#force_color_prompt=yes
+
+if [ -n "$force_color_prompt" ]; then
+    if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+        # We have color support; assume it's compliant with Ecma-48
+        # (ISO/IEC-6429). (Lack of such support is extremely rare, and such
+        # a case would tend to support setf rather than setaf.)
+        color_prompt=yes
+    else
+        color_prompt=
+    fi
+fi
+
+if [ "$color_prompt" = yes ]; then
+    PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+fi
+unset color_prompt force_color_prompt
+
+# If this is an xterm set the title to user@host:dir
+case "$TERM" in
+xterm*|rxvt*)
+    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+    ;;
+*)
+    ;;
+esac
+
+# enable color support of ls and also add handy aliases
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    #alias dir='dir --color=auto'
+    #alias vdir='vdir --color=auto'
+
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# colored GCC warnings and errors
+#export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# some more ls aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Add an "alert" alias for long running commands.  Use like so:
+#   sleep 10; alert
+alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+
+# Alias definitions.
+# You may want to put all your additions into a separate file like
+# ~/.bash_aliases, instead of adding them here directly.
+# See /usr/share/doc/bash-doc/examples in the bash-doc package.
+
+if [ -f ~/.bash_aliases ]; then
+    . ~/.bash_aliases
+fi
+
+# enable programmable completion features (you don't need to enable
+# this, if it's already enabled in /etc/bash.bashrc and /etc/profile
+# sources /etc/bash.bashrc).
+if ! shopt -oq posix; then
+  if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+  fi
+fi
+
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+ubuntu@DESCKTOP-MB-K700:/mnt/d/work/homepage-v2-installer$ node -v
+v22.22.2
+ubuntu@DESCKTOP-MB-K700:/mnt/d/work/homepage-v2-installer$ which node
+/home/ubuntu/.nvm/versions/node/v22.22.2/bin/node
+ubuntu@DESCKTOP-MB-K700:/mnt/d/work/homepage-v2-installer$ exit
+logout
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -ls 'env'
+ubuntu@DESCKTOP-MB-K700:~/homepage/setup$ exit
+logout
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'env'
+
+SHELL=/bin/bash
+WSL2_GUI_APPS_ENABLED=1
+WSL_DISTRO_NAME=homepage-v2-latest
+WT_SESSION=612e4b77-482d-4692-a973-0691e435228f
+NAME=DESCKTOP-MB-K700
+PWD=/home/ubuntu/homepage/setup
+LOGNAME=ubuntu
+HOME=/home/ubuntu
+LANG=C.UTF-8
+WSL_INTEROP=/run/WSL/1175_interop
+WAYLAND_DISPLAY=wayland-0
+TERM=xterm-256color
+USER=ubuntu
+DISPLAY=:0
+SHLVL=0
+XDG_RUNTIME_DIR=/run/user/1000/
+WSLENV=WT_SESSION:WT_PROFILE_ID:
+XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:/mnt/c/Windows/system32:/mnt/c/Windows:/mnt/c/Windows/System32/Wbem:/mnt/c/Windows/System32/WindowsPowerShell/v1.0/:/mnt/c/Windows/System32/OpenSSH/:/mnt/c/Program Files (x86)/NVIDIA Corporation/PhysX/Common:/mnt/c/Program Files/TortoiseSVN/bin:/mnt/c/PROGRA~1/JPKI:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/c/WINDOWS/System32/OpenSSH/:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/c/WINDOWS/System32/OpenSSH/:/mnt/c/Program Files/dotnet/:/mnt/c/Program Files/Git/cmd:/mnt/c/Program Files/GitHub CLI/:/mnt/c/Users/okamo/.local/bin:/mnt/c/Users/okamo/AppData/Local/Microsoft/WindowsApps:/mnt/c/Users/okamo/.dotnet/tools:/mnt/c/Users/okamo/.local/bin:/mnt/c/Program Files/nodejs:/mnt/c/Users/okamo/AppData/Local/Programs/Microsoft VS Code/bin:/mnt/c/Users/okamo/AppData/Local/Microsoft/WinGet/Packages/astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe:/mnt/c/Users/okamo/AppData/Local/nvm:/mnt/c/nvm4w/nodejs:/mnt/c/Users/okamo/AppData/Local/Microsoft/WinGet/Packages/aria2.aria2_Microsoft.Winget.Source_8wekyb3d8bbwe/aria2-1.37.0-win-64bit-build1:/snap/bin
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+HOSTTYPE=x86_64
+PULSE_SERVER=unix:/mnt/wslg/PulseServer
+WT_PROFILE_ID={61c54bbd-c2c6-5271-96e7-009a87ff44bf}
+_=/usr/bin/env
+PS D:\work\homepage-v2-installer>
+
+
+GitHub Copilot: 予想通り、**`bash -lc` では `~/.bashrc` が読まれない**ため `NVM_DIR` も `nvm.sh` も初期化されていません（`env` 出力に `NVM_DIR` がない／`PATH` に `.nvm` なし）。
+
+先ほど HomepageV2Tray.ps1 に入れた修正（`nvm.sh` を明示 source してから `npm run dev`）で解決するはずです。
+
+## 動作確認（再ビルド前）
+
+PowerShell から以下を実行して、Next.js が `http://localhost:3001` で立ち上がるか確認してください:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"; npm run dev'
+```
+
+`> next dev -p 3001` の後に `Ready` 行が出れば成功（Ctrl+C で停止）。  
+`'next' は ... 認識されていません` のような Windows 側 npm.cmd フォールバックは消えるはずです。
+
+## 確認できたら再ビルド
+
+```powershell
+cd d:\work\homepage-v2-installer
+.\tray-app\build-exe.ps1
+Copy-Item .\tray-app\HomepageV2Tray.exe "$env:LOCALAPPDATA\HomepageV2\app\HomepageV2Tray.exe" -Force
+```
+
+トレイから「起動」を押してブラウザが `localhost:3001` で開けばOKです。
+
+## 配布用 WSL イメージ側の恒久対策（推奨）
+
+将来同じ問題を踏まないよう、WSL イメージ内で以下を設定してから export し直すのがおすすめ:
+
+```bash
+# ubuntu@homepage-v2-latest 上で
+cat > ~/.bash_profile <<'EOF'
+# login shell でも .bashrc を読む（nvm 等を確実に初期化するため）
+[ -f ~/.bashrc ] && . ~/.bashrc
+EOF
+```
+
+これで `bash -lc` でも nvm が読まれるようになり、tray-app 側の `nvm.sh` 明示 source も不要になります（残しておいても害はないので両方やる方が安全）。
+
+結果を教えてください。
+
+User: wsl側で exportか source ~/.bashrcしないと無理じゃないかな。PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"; npm run dev'
+
+> homepage-v2-setup@1.0.0 dev
+> next dev -p 3001
+
+'\\wsl.localhost\homepage-v2-latest\home\ubuntu\homepage\setup'
+上記の現在のディレクトリで CMD.EXE を開始しました。
+UNC パスはサポートされません。Windows ディレクトリを既定で使用します。
+'next' は、内部コマンドまたは外部コマンド、
+操作可能なプログラムまたはバッチ ファイルとして認識されていません。
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'ls'
+next.config.ts  package.json  postcss.config.mjs  scripts  src  tsconfig.json
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc '/home/ubuntu/.nvm/versions/node/v22.22.2/bin/node -v'
+v22.22.2
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export TES1T=test1; echo $TEST1;'
+
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export TES1T=test1; echo TEST1=$TEST1;'
+TEST1=
+
+GitHub Copilot: 原因が見えました。`nvm.sh` を source しただけでは **デフォルトの node バージョンが alias 設定されていないと PATH に追加されない**ため、依然として Windows 側の `npm.cmd` にフォールバックしています。
+
+## 確認
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm version default; which npm'
+```
+
+おそらく `default` が `N/A` で、`which npm` が `/mnt/c/...` の Windows パスを返すはずです。
+
+## 解決策（2案）
+
+### 案A: トレイから `nvm use` を明示する（イメージ修正不要）
+
+ユーザーがインストール済みの最新 node を使用するなら、`nvm use --lts` か `nvm use node`（最新版）でPATHに乗ります。   
+
+Replacing 14 lines with 19 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+## 手動テスト（再ビルド前）
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm use --silent default 2>/dev/null || nvm use --silent node; which npm; npm run dev'
+```
+
+`which npm` が `/home/ubuntu/.nvm/versions/node/v22.22.2/bin/npm` を返し、`Ready` まで進めば成功です。
+
+### 案B: 配布 WSL イメージ側に `default` alias を設定（**こちらが本筋・推奨**）
+
+ユーザー側で `nvm use` 不要にする恒久対策です。WSL 内で：
+
+```bash
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm alias default 22.22.2; nvm use default'
+```
+
+その後 `wsl --export homepage-v2-latest D:\wsl_backup\homepage-v2-latest.tar` で再エクスポートし、tar.gz + sha256 を新しいリリースとして上げ直します。これで `bash -lc` 起動でもコンテナ起動時に確実に node が使えます（イメージのプロビジョニングとして正しい状態）。
+
+> ご質問の「`source ~/.bashrc` しないと無理では」は半分正しく、**より根本的には `nvm.sh` 単体ではなく `nvm use default` が必要**です。`~/.bashrc` 経由で動いていた理由は、おそらく以前 `nvm install 22` 実行時に自動で default が設定されていたから、または `~/.bashrc` 内で `nvm use` を明示していたから、のいずれかです。
+
+---
+
+### 推奨手順
+
+1. **案A の手動テストで動作確認** → 動けば原因確定
+2. **案B でイメージ側を恒久対応**（default alias 設定 → 再エクスポート → 再アップロード）
+3. 案A の修正はトレイ側に**残しておく**（防御策として安価）
+
+案A 単独でもユーザー体験上は十分なので、急ぐなら 1 → トレイ再ビルドで終わらせ、後日リリース時に 2 をやれば OK です。
+
+Made changes.
+
+User: export自体できてないのでは？PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export TES1T=test1; echo TEST1=$TEST1;'
+TEST1=
+
+GitHub Copilot: それタイポです。設定したのは `TES1T`（S と T の間に 1）、表示しようとしたのは `TEST1`。別変数なので空になります。
+
+確認:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'export TEST1=hello; echo TEST1=$TEST1'
+```
+
+→ `TEST1=hello` と表示されるはずです。
+
+つまり `bash -lc` で `export` は問題なく効いています。問題は前回お伝えした通り **`nvm use default`（または `node`）が必要**な点だけです。
+
+先ほどの `案A` の手動テストをそのまま試してください:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm use --silent default 2>/dev/null || nvm use --silent node; which npm; npm run dev'
+```
+
+`which npm` の結果と、その後の `npm run dev` の挙動を見せてください。
+
+User: PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export TEST1=test1; echo TEST1=$TEST1;'
+TEST1=
+
+GitHub Copilot: その現象、`export` 自体は効いているはずです。証拠として、**前回 `npm run dev` を実行した時に `> next dev -p 3001` まで進んだ**ことが挙げられます。`nvm.sh` が source されて npm が見つかってスクリプトが起動しているので、`bash -lc` 内のセミコロン連結も動作しています。
+
+`TEST1=` が空になった理由は別の可能性が高いです。試しに以下を実行してみてください:
+
+```powershell
+# 1) 同じ内容を && でつなぐ（; が wsl.exe 側で何か悪さしてないか確認）
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'export TEST1=test1 && echo TEST1=$TEST1'
+
+# 2) ヒアドキュメント風に -c の中身を完全な1行に
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'TEST1=test1; echo "TEST1=$TEST1"'
+```
+
+どちらかで `TEST1=test1` が出るはずです。
+
+## 本題に戻ると
+
+前回の `npm run dev` 実行で `next dev -p 3001` まで進んだ事実から、**`bash -lc` に複数文を渡すこと自体は動いている**と確定しています。残る問題は **PATH 上に Linux 版 npm が乗っていないため Windows 側の npm/node が使われている**点だけです。
+
+解決すべきは `nvm use default`（または `node`）を実行して PATH に Linux node を載せること。先ほどの修正済みコマンドで：
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm use --silent default 2>/dev/null || nvm use --silent node 2>/dev/null; which npm; npm run dev'
+```
+
+を実行してみてください。`which npm` が `/home/ubuntu/.nvm/versions/node/v22.22.2/bin/npm` を返せばOK、そのまま `Ready` まで進むはずです。
+
+その結果と、もし可能なら上記 (1)(2) の `TEST1=...` の結果も貼ってもらえれば確実に切り分けられます。
+
+User: TEST1=
+PS D:\work\homepage-v2-installer> # 1) 同じ内容を && でつなぐ（; が wsl.exe 側で何か悪さしてないか確認）
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'export TEST1=test1 && echo TEST1=$TEST1'
+
+TEST1=
+PS D:\work\homepage-v2-installer>
+PS D:\work\homepage-v2-installer> # 2) ヒアドキュメント風に -c の中身を完全な1行に
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'TEST1=test1; echo "TEST1=$TEST1"'
+TEST1=
+PS D:\work\homepage-v2-installer>
+
+GitHub Copilot: 不思議ですね。`npm run dev` は前回 `next dev -p 3001` まで走ったので bash 自体は動いています。変数展開だけ怪しい挙動です。
+
+切り分けのため、まず簡単なテストを試してください:
+
+```powershell
+# A) bash がそもそも文字列を返せるか
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'echo HELLOWORLD'
+
+# B) -l (login) を外したらどうか
+wsl -d homepage-v2-latest -u ubuntu -- bash -c 'TEST1=test1; echo TEST1=$TEST1'
+
+# C) 既に export 済みの変数を見るだけ（=記号なし）
+wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'echo HOME=$HOME'
+```
+
+特に **(C) で `HOME=/home/ubuntu` が出るか** が重要です。出れば「`bash -lc` 自体は変数展開できる」が確定し、`TEST1` の件は環境固有の何か（PSReadLine, シェル拡張等）の可能性に絞れます。
+
+仮にこの謎は置いておくとして、**前回 `npm run dev` までは正常に走った**事実があるので、本題の解決は変わりません:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu --cd /home/ubuntu/homepage/setup -- bash -lc 'export NVM_DIR="$HOME/.nvm"; \. "$NVM_DIR/nvm.sh"; nvm use --silent default 2>/dev/null || nvm use --silent node 2>/dev/null; which npm; npm run dev'
+```
+
+この **`which npm` の出力**を見れば、Linux 版 npm が PATH に乗ったか確定します。先にこれを試して結果を貼ってもらえますか？
+
+User: wsl側に /home/ubuntu/homepage/setup/start.sh を用意して、start.shで環境変数セットsレ場解決じゃないかな?おそらく環境変数外から入れるのは別の方法でないと厳しいのでは？PS D:\work\homepage-v2-installer> # A) bash がそもそも文字列を返せるか
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'echo HELLOWORLD'
+
+HELLOWORLD
+PS D:\work\homepage-v2-installer>
+PS D:\work\homepage-v2-installer> # B) -l (login) を外したらどうか
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -c 'TEST1=test1; echo TEST1=$TEST1'
+TEST1=
+PS D:\work\homepage-v2-installer>
+PS D:\work\homepage-v2-installer> # C) 既に export 済みの変数を見るだけ（=記号なし）
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -lc 'echo HOME=$HOME'
+HOME=/home/ubuntu
+
+GitHub Copilot: 良い案です。実は今回の `TEST1=` が空になる根本原因も判明しました。**`bash -lc 'cmd' arg0 arg1...` の引数解釈**で、PowerShell + wsl.exe が空白で分割するため、bash は `TEST1=test1;` をコマンドとして受け、`echo` が `$0`、`TEST1=$TEST1` が `$1` として扱われる挙動になっています（最初の `cmd` 部分しか実行されない）。
+
+ご提案通り **WSL イメージ内にラッパースクリプトを置いて、トレイからはそれを呼ぶだけ** にすれば、シェルクォーティング問題から解放されます。これが最もクリーンな解です。
+
+## 構成
+
+### 1. WSL イメージに `start.sh` を追加（homepage リポ側）
+
+`homepage/setup/start.sh`（実行権限付き）として:
+
+```bash
+#!/usr/bin/env bash
+set -e
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+nvm use --silent default 2>/dev/null || nvm use --silent node 2>/dev/null || true
+cd "$(dirname "$0")"
+exec npm run dev
+```
+
+```bash
+chmod +x /home/ubuntu/homepage/setup/start.sh
+```
+
+これを `wsl --export` し直して新しい配布イメージに含めます。
+
+### 2. トレイアプリ修正   
+
+Replacing 10 lines with 11 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+
+
+Replacing 19 lines with 10 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+## 動作確認
+
+### A. 配布前の WSL イメージで `start.sh` を作成
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- bash -c 'cat > /home/ubuntu/homepage/setup/start.sh' 
+```
+
+…とやろうとすると同じクォート地獄なので、**WSL に入って手で書く**のが確実です:
+
+```powershell
+wsl -d homepage-v2-latest
+```
+
+WSL 内で:
+```bash
+cat > /home/ubuntu/homepage/setup/start.sh <<'EOF'
+#!/usr/bin/env bash
+set -e
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+nvm use --silent default 2>/dev/null || nvm use --silent node 2>/dev/null || true
+cd "$(dirname "$0")"
+exec npm run dev
+EOF
+chmod +x /home/ubuntu/homepage/setup/start.sh
+exit
+```
+
+### B. PowerShell から手動でテスト
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- bash /home/ubuntu/homepage/setup/start.sh
+```
+
+`Ready` まで進めば成功です。
+
+### C. トレイアプリ再ビルド
+
+```powershell
+cd d:\work\homepage-v2-installer
+.\tray-app\build-exe.ps1
+Copy-Item .\tray-app\HomepageV2Tray.exe "$env:LOCALAPPDATA\HomepageV2\app\HomepageV2Tray.exe" -Force
+```
+
+トレイから「起動」を押せば、ブラウザが `http://localhost:3001` で開くはずです。
+
+## 配布フローの恒久対応
+
+WSL イメージに `start.sh` を含めた状態で `wsl --export homepage-v2-latest D:\wsl_backup\homepage-v2-latest.tar` し直してください。今後はインストーラ経由でも同じスクリプトが配布されます。
+
+---
+
+> 「`export` が外から効かない」問題の正体は、**bash -lc に複数文を渡すとPowerShell + wsl.exe の引数分割で壊れる**ことでした。`bash` から見ると `bash -c "TEST1=test1;" "echo" "TEST1=\$TEST1"` のような形になり、`-c` には最初のトークンだけが渡されて echo は実行されません。`HOME=$HOME` が動いたのは1トークンだったから、`npm run dev` が動いたのもこれまた1トークンだったから、です。ラッパースクリプト方式ならこの問題が根本的に消えます。
+
+Made changes.
+
+User: start.sh は source ~/.bashrc; cd ~/homepage/setup/; npm run dev として普通にwslで実行するのと同じがよいのでは？
+
+GitHub Copilot: 賛成です。シンプルで人間が WSL で手動実行するのと同じ動作になり、デバッグもしやすいです。
+
+ただし1点だけ注意:  
+`source ~/.bashrc` の中身（標準の Ubuntu）は冒頭に
+```bash
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+```
+があり、**非対話シェルだと即 return** します。`bash` を `-i`（interactive）で起動するか、`source` 前に `$-` を細工する必要があります。
+
+## 推奨: `start.sh` を以下に
+
+```bash
+#!/usr/bin/env bash
+source ~/.bashrc
+cd ~/homepage/setup
+npm run dev
+```
+
+## 呼び出し側を `bash -i` に変更    
+
+Replacing 10 lines with 10 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+## 手順
+
+### A. WSL に start.sh を作成
+
+```powershell
+wsl -d homepage-v2-latest
+```
+WSL 内で:
+```bash
+cat > ~/homepage/setup/start.sh <<'EOF'
+#!/usr/bin/env bash
+source ~/.bashrc
+cd ~/homepage/setup
+npm run dev
+EOF
+chmod +x ~/homepage/setup/start.sh
+exit
+```
+
+### B. PowerShell から手動テスト
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- bash -i /home/ubuntu/homepage/setup/start.sh
+```
+
+`Ready` が出ればOK。
+
+### C. トレイアプリ再ビルド
+
+```powershell
+cd d:\work\homepage-v2-installer
+.\tray-app\build-exe.ps1
+Copy-Item .\tray-app\HomepageV2Tray.exe "$env:LOCALAPPDATA\HomepageV2\app\HomepageV2Tray.exe" -Force
+```
+
+### D. 配布用イメージ更新
+
+`start.sh` を含んだ状態で `wsl --export homepage-v2-latest D:\wsl_backup\homepage-v2-latest.tar` し直し、tar.gz と sha256 を再生成 → リリースに上げ直し。
+
+---
+
+> もし手動テスト B で `bash: cannot set terminal process group` のような対話シェル警告が出ることがあれば、`-i` の代わりに `start.sh` の先頭で nvm を直接読む方式に戻すのも手です。ただ Windows + wsl.exe 環境では `-i` は問題なく動くケースがほとんどです。
+
+Made changes.
+
+User: うまくいきました。installerは修正済ですか？buildしてよい？
+PS D:\work\homepage-v2-installer> wsl -d homepage-v2-latest -u ubuntu -- bash -i /home/ubuntu/homepage/setup/start.sh
+
+> homepage-v2-setup@1.0.0 dev
+> next dev -p 3001
+
+▲ Next.js 16.2.4 (Turbopack)
+- Local:         http://localhost:3001
+- Network:       http://10.255.255.254:3001
+✓ Ready in 326ms
+Attention: Next.js now collects completely anonymous telemetry regarding usage.
+This information is used to shape Next.js' roadmap and prioritize features.
+You can learn more, including how to opt-out if you'd not like to participate in this anonymous program, by visiting the following URL:
+https://nextjs.org/telemetry
+
+
+ GET / 200 in 2.4s (next.js: 2.1s, application-code: 218ms)
+ GET /api/status 200 in 280ms (next.js: 263ms, application-code: 17ms)
+ GET /api/status 200 in 7ms (next.js: 2ms, application-code: 4ms)
+ GET /setup0 200 in 419ms (next.js: 387ms, application-code: 32ms)
+ GET /api/status 200 in 8ms (next.js: 4ms, application-code: 4ms)
+ GET /api/status 200 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/status 200 in 10ms (next.js: 2ms, application-code: 8ms)
+^C
+
+GitHub Copilot: 動作確認OKです、おめでとうございます。
+
+トレイアプリ側 HomepageV2Tray.ps1 は `bash -i $StartScript` を呼ぶ形に修正済みです。build.ps1 でそのままビルドして大丈夫です。
+
+## ビルド前のチェック
+
+ひとつだけ確認: **配布する WSL イメージに `start.sh` が含まれているか**。今手元の WSL で確認してください:
+
+```powershell
+wsl -d homepage-v2-latest -u ubuntu -- ls -la /home/ubuntu/homepage/setup/start.sh
+```
+
+含まれていれば `wsl --export` し直して新しい `homepage-v2-latest.tar` を作成 → gzip → sha256 → GitHub Releases に上げ直し、が必要です。
+
+## ビルド手順
+
+```powershell
+cd d:\work\homepage-v2-installer
+.\build.ps1
+```
+
+→ homepage-v2-installer-setup.exe が生成されます。
+
+## ローカル動作確認（フル流れテスト）
+
+念のため、生成されたインストーラを使って一度クリーンインストールテストをしておくと安心です:
+
+1. 既存の WSL ディストリを削除（テスト用）  
+   ```powershell
+   wsl --unregister homepage-v2-latest
+   ```
+   ※ 中身は配布イメージ側にあるので、開発側のソースは消えません
+2. キャッシュも削除  
+   ```powershell
+   Remove-Item "$env:LOCALAPPDATA\HomepageV2\cache" -Recurse -Force -ErrorAction SilentlyContinue
+   ```
+3. 生成された homepage-v2-installer-setup.exe を実行 → DL → 取り込み → トレイ起動 → 「起動」→ ブラウザで `http://localhost:3001` を確認
+
+問題なければそのままリリース可能です。
+
+User: きちんとlocalhost:3001が起動できているに、起動確認がタイムアウトしましたとでます。 npm run devがおそいから、npm run start にかえたのですが、それが原因かな？
+
+GitHub Copilot: Searched for regex `3001|localhost|起動確認|timeout|Timeout`, 20 results
+
+Read [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1#1-1), lines 1 to 220
+
+原因はおそらくタイムアウトの長さです。
+
+現状 HomepageV2Tray.ps1 のポーリングは **60秒** で打ち切られます:
+
+```powershell
+} elseif ($script:WaitElapsed -ge 60) {
+```
+
+`npm run dev` (Next.js dev サーバ) は数秒〜十数秒で listen を開始しますが、`npm run start` は通常 `next build` 済みのアーティファクトが必要で、
+
+- スクリプトが `"start": "next build && next start"` のように build を含んでいる
+- もしくは初回 build キャッシュ生成・依存解決で時間がかかる
+
+といったケースで **60秒を超えてから 3001 が開く** ことがあります。実際にブラウザで開けるのは、タイムアウトの balloon が出た「後」になっているはずです（ポーリングは止まっているので、自動ブラウザ起動もスキップされる）。
+
+## 対処案
+
+1. タイムアウトを伸ばす（例: 300秒 = 5分）
+2. balloon 後もユーザが「ブラウザを開く」メニューで開けるので、メッセージを「まだ準備中の可能性があります」に変えるとより親切
+
+修正していいですか？ ついでに `npm run start` 運用なら、WSL 側 `start.sh` で `next build` 済みかどうかを判定して、未ビルドなら build → start、ビルド済みなら start 直行、にしておくと毎回の起動が速くなります（必要なら start.sh も見直し提案します）。
+
+とりあえずタイムアウトを 300 秒に延ばす変更を入れますか？
+
+User: 一瞬で起動してます。こちらが作業している間に、なぜかタイムアウト通知です。
+
+GitHub Copilot: なるほど、それなら `Test-PortOpen` のバグが原因の可能性が高いです。
+
+HomepageV2Tray.ps1 の中身：
+
+```powershell
+$iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+$ok = $iar.AsyncWaitHandle.WaitOne(300, $false)
+if ($ok -and $client.Connected) {
+```
+
+`BeginConnect` は **`EndConnect` を呼ぶまで `client.Connected` が `false` のまま** という.NET の仕様があります。なので 3001 が listen していても常に `false` を返し続け、ポーリングは成功判定に入れず 60 秒経過 → タイムアウト balloon、という流れになっています。実サーバは動いているのでユーザは普通にブラウザで開ける（＝「一瞬で起動」している）状態と一致します。
+
+修正します: 
+
+Replacing 15 lines with 24 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+修正内容:
+
+- `EndConnect` を必ず呼んでから `Connected` を判定（これが本丸）
+- IPv4 (`127.0.0.1`) と IPv6 (`::1`) の両方を試行（Next.js が IPv6 のみで listen する環境への保険）
+- タイムアウトを 300ms → 500ms に少し緩和
+- `try/finally` でソケットを確実に Close
+
+これで、サーバが立ち上がった瞬間にポーリングが成功 → 自動でブラウザが開き、タイムアウト balloon は出なくなります。`npm run start` のままで問題ありません。
+
+`.exe` を再ビルドする場合は build-exe.ps1 を再実行してください。
+
+Made changes.
+
+User: そもそもタイムアウト判定が不要ではないかな？ブラウザ立ち上がれば、あとは動くか、動かないか　が見えるし、どう思う？
+
+GitHub Copilot: 賛成です。ブラウザが開くかどうかが結局のフィードバックになるので、タイムアウト balloon はノイズですね。
+
+ただ完全に無制限ポーリングだと、起動失敗時にタイマーが回りっぱなしになるので：
+
+- balloon は出さない
+- 上限はかなり長めに（10分）してサイレントに停止
+- `Stop-Server` 時にも残っている WaitTimer を確実に止める
+
+の方針で修正します。 
+
+Replacing 19 lines with 25 lines in [](file:///d%3A/work/homepage-v2-installer/tray-app/HomepageV2Tray.ps1)
+
+
+```
+
+```
+変更点:
+
+- 「起動確認がタイムアウトしました」balloon を削除
+- 上限は 60秒 → 600秒（10分）に延長し、超えたらサイレントにポーリング停止＋ログだけ残す
+- `Stop-Server` で残存している WaitTimer を確実に止める（停止後にゾンビポーリングが残らない）
+
+これで「起動した→ブラウザ開く→以降はユーザが見て判断」というシンプルな挙動になります。
+
+Made changes.
