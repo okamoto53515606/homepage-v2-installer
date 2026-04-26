@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   homepage-v2-installer: WSL ディストリの登録解除
 .DESCRIPTION

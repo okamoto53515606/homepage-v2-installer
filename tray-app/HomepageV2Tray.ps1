@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   homepage-v2-installer: タスクトレイ常駐 起動/停止UI
 .DESCRIPTION

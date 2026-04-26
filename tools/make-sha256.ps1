@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   homepage-v2-latest.tar の SHA256 ハッシュファイルを生成する
 .DESCRIPTION

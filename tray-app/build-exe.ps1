@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   HomepageV2Tray.ps1 を ps2exe で .exe 化する
 .NOTES

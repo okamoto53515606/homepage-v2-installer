@@ -53,10 +53,11 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
-; インストール直後: WSL イメージ DL & import （3GB のため時間がかかる旨を表示）
+; インストール直後: ダウンロード済み tar を検証 → wsl --import
+; （DL は [Code] セクションでウィザードの進捗バーを使って実施済み）
 Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install-wsl.ps1"" -DistroName ""{#MyDistroName}"""; \
-    StatusMsg: "WSL イメージをダウンロードして取り込んでいます (約3GB、数分かかります)..."; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install-wsl.ps1"" -DistroName ""{#MyDistroName}"" -TarFile ""{code:GetTarPath}"" -ExpectedSha256 ""{code:GetExpectedSha256}"""; \
+    StatusMsg: "WSL イメージを検証して取り込んでいます (数分かかります)..."; \
     Flags: runhidden waituntilterminated
 
 ; トレイアプリ起動（任意）
@@ -74,6 +75,101 @@ Type: filesandordirs; Name: "{localappdata}\HomepageV2\cache"
 ; logs と wsl は意図的に残す（ユーザーが手動で消せる）
 
 [Code]
+var
+  DownloadPage: TDownloadWizardPage;
+  CachedTarPath: String;
+  CachedSha256: String;
+
+function GetTarPath(Param: String): String;
+begin
+  Result := CachedTarPath;
+end;
+
+function GetExpectedSha256(Param: String): String;
+begin
+  Result := CachedSha256;
+end;
+
+function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  if ProgressMax <> 0 then
+    Log(Format('  %d / %d (%d%%)', [Progress, ProgressMax, (Progress * 100) div ProgressMax]));
+  Result := True;
+end;
+
+procedure InitializeWizard;
+begin
+  DownloadPage := CreateDownloadPage(
+    'WSL イメージのダウンロード',
+    'homepage-v2 用の WSL2 イメージ (約3GB) をダウンロードしています。回線速度により数分〜十数分かかります。',
+    @OnDownloadProgress);
+end;
+
+function LoadSha256FromFile(const FilePath: String): String;
+var
+  Lines: TArrayOfString;
+  S: String;
+  SpacePos: Integer;
+begin
+  Result := '';
+  if not LoadStringsFromFile(FilePath, Lines) then Exit;
+  if GetArrayLength(Lines) = 0 then Exit;
+  S := Trim(Lines[0]);
+  SpacePos := Pos(' ', S);
+  if SpacePos > 0 then
+    Result := Lowercase(Copy(S, 1, SpacePos - 1))
+  else
+    Result := Lowercase(S);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  CacheDir, TarPath, ShaPath, TarUrl, ShaUrl: String;
+begin
+  Result := True;
+  if CurPageID = wpReady then
+  begin
+    CacheDir := ExpandConstant('{localappdata}\HomepageV2\cache');
+    if not ForceDirectories(CacheDir) then
+    begin
+      MsgBox('キャッシュフォルダを作成できません: ' + CacheDir, mbError, MB_OK);
+      Result := False; Exit;
+    end;
+    TarPath := CacheDir + '\homepage-v2-latest.tar';
+    ShaPath := CacheDir + '\homepage-v2-latest.tar.sha256';
+    TarUrl  := 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar';
+    ShaUrl  := 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar.sha256';
+
+    DownloadPage.Clear;
+    DownloadPage.Add(ShaUrl, 'homepage-v2-latest.tar.sha256', '');
+    DownloadPage.Add(TarUrl, 'homepage-v2-latest.tar', '');
+    DownloadPage.Show;
+    try
+      try
+        DownloadPage.Download;
+        // CreateDownloadPage は {tmp} に保存するため、キャッシュへコピー
+        FileCopy(ExpandConstant('{tmp}\homepage-v2-latest.tar.sha256'), ShaPath, False);
+        FileCopy(ExpandConstant('{tmp}\homepage-v2-latest.tar'), TarPath, False);
+        CachedTarPath := TarPath;
+        CachedSha256  := LoadSha256FromFile(ShaPath);
+        if Length(CachedSha256) <> 64 then
+        begin
+          MsgBox('SHA256 ハッシュファイルの形式が不正です。', mbError, MB_OK);
+          Result := False;
+        end;
+      except
+        if MsgBox('ダウンロードに失敗しました: ' + GetExceptionMessage + #13#10 + 'リトライしますか？',
+                  mbError, MB_YESNO) = IDYES then
+          Result := False  // ウィザード上に留まる→再度 Next で再試行
+        else
+          Result := False;
+      end;
+    finally
+      DownloadPage.Hide;
+    end;
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;

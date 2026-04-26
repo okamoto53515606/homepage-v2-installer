@@ -1,31 +1,33 @@
-<#
+﻿<#
 .SYNOPSIS
-  homepage-v2-installer: WSL2 イメージのダウンロード・検証・インポート
+  homepage-v2-installer: WSL2 イメージの検証・インポート
 .DESCRIPTION
   Inno Setup の [Run] セクションから呼び出される想定。
-  - %LOCALAPPDATA%\HomepageV2 配下にイメージを展開
-  - R2 から tar と .sha256 をダウンロード（BITS 利用）
-  - SHA256 検証
-  - wsl --import で取り込み
-  - 既存ディストリがあればスキップ（再実行に強い）
+  ダウンロードは Inno Setup 側 (CreateDownloadPage) で進捗表示付きで実施済み。
+  本スクリプトは以下を担当:
+    - SHA256 検証
+    - 既存ディストリ判定 (再実行に強い)
+    - wsl --import
+.PARAMETER TarFile
+  ダウンロード済み tar ファイルのフルパス
+.PARAMETER ExpectedSha256
+  期待される SHA256 (16進64文字, 小文字)
 #>
 
 [CmdletBinding()]
 param(
-    [string]$DistroName  = 'homepage-v2-latest',
-    [string]$TarUrl      = 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar',
-    [string]$Sha256Url   = 'https://pub-a692d5b289c84f6991126101fe2d638d.r2.dev/homepage-v2-latest.tar.sha256',
-    [string]$BaseDir     = (Join-Path $env:LOCALAPPDATA 'HomepageV2'),
+    [Parameter(Mandatory)] [string]$TarFile,
+    [Parameter(Mandatory)] [string]$ExpectedSha256,
+    [string]$DistroName = 'homepage-v2-latest',
+    [string]$BaseDir    = (Join-Path $env:LOCALAPPDATA 'HomepageV2'),
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 
-# --- ディレクトリ準備 ---------------------------------------------------------
-$WslDir   = Join-Path $BaseDir 'wsl'
-$CacheDir = Join-Path $BaseDir 'cache'
-$LogDir   = Join-Path $BaseDir 'logs'
-foreach ($d in @($BaseDir, $WslDir, $CacheDir, $LogDir)) {
+$WslDir = Join-Path $BaseDir 'wsl'
+$LogDir = Join-Path $BaseDir 'logs'
+foreach ($d in @($BaseDir, $WslDir, $LogDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
 $LogFile = Join-Path $LogDir ('install-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
@@ -43,37 +45,41 @@ trap {
     exit 1
 }
 
-Write-Log "=== homepage-v2-installer / install-wsl.ps1 ==="
-Write-Log "Distro     : $DistroName"
-Write-Log "BaseDir    : $BaseDir"
-Write-Log "TarUrl     : $TarUrl"
+Write-Log "=== install-wsl.ps1 ==="
+Write-Log "Distro      : $DistroName"
+Write-Log "TarFile     : $TarFile"
+Write-Log "ExpectedSHA : $ExpectedSha256"
+
+if (-not (Test-Path $TarFile)) {
+    throw "tar が見つかりません: $TarFile"
+}
+$ExpectedSha256 = $ExpectedSha256.ToLower().Trim()
+if ($ExpectedSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "ExpectedSha256 の形式が不正: '$ExpectedSha256'"
+}
 
 # --- WSL 利用可能チェック -----------------------------------------------------
 try {
     $null = & wsl.exe --status 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "wsl --status が失敗しました (ExitCode=$LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "wsl --status が失敗 (ExitCode=$LASTEXITCODE)" }
 } catch {
-    Write-Log "WSL が利用できません。`n  PowerShell を管理者で開き、`wsl --install` を実行後にPCを再起動してから本インストーラを再実行してください。" 'ERROR'
+    Write-Log "WSL が利用できません。`wsl --install` 実施後に再起動してください。" 'ERROR'
     throw
 }
 
-# --- 既存ディストリの判定 -----------------------------------------------------
-# wsl --list の出力は UTF-16LE。PowerShell 側で正しくデコードする
-$prevEncoding = [Console]::OutputEncoding
+# --- 既存ディストリ判定 -------------------------------------------------------
+$prev = [Console]::OutputEncoding
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     $list = (& wsl.exe --list --quiet) 2>$null
 } finally {
-    [Console]::OutputEncoding = $prevEncoding
+    [Console]::OutputEncoding = $prev
 }
 $exists = $false
-if ($list) {
-    $exists = ($list | Where-Object { $_.Trim() -eq $DistroName }).Count -gt 0
-}
+if ($list) { $exists = ($list | Where-Object { $_.Trim() -eq $DistroName }).Count -gt 0 }
 
 if ($exists -and -not $Force) {
     Write-Log "既存ディストリ '$DistroName' を検出。インポートをスキップします。"
-    Write-Log "（再取得したい場合は --Force もしくはアンインストール→再インストールしてください）"
     exit 0
 }
 
@@ -84,60 +90,17 @@ if ($exists -and $Force) {
     if ($LASTEXITCODE -ne 0) { throw "wsl --unregister 失敗" }
 }
 
-# --- tar ダウンロード（BITS、再開可能） ---------------------------------------
-$TarFile    = Join-Path $CacheDir 'homepage-v2-latest.tar'
-$Sha256File = Join-Path $CacheDir 'homepage-v2-latest.tar.sha256'
-
-function Invoke-Download {
-    param([string]$Url, [string]$Dest)
-    Write-Log "Downloading: $Url -> $Dest"
-    try {
-        # BITS は大容量・再開対応に最適
-        Import-Module BitsTransfer -ErrorAction Stop
-        Start-BitsTransfer -Source $Url -Destination $Dest -Description 'homepage-v2-installer' -DisplayName 'WSL イメージをダウンロード中'
-    } catch {
-        Write-Log "BITS が使えないため Invoke-WebRequest にフォールバック: $($_.Exception.Message)" 'WARN'
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
-    }
+# --- SHA256 検証 --------------------------------------------------------------
+Write-Log "SHA256 検証中..."
+$actual = (Get-FileHash -LiteralPath $TarFile -Algorithm SHA256).Hash.ToLower()
+Write-Log "Actual   SHA256: $actual"
+if ($actual -ne $ExpectedSha256) {
+    try { Remove-Item $TarFile -Force -ErrorAction SilentlyContinue } catch {}
+    throw "SHA256 不一致。ダウンロード破損の可能性。インストーラを再実行してください。"
 }
+Write-Log "SHA256 検証 OK"
 
-# .sha256 は毎回最新を取得（latest は更新される前提）
-if (Test-Path $Sha256File) { Remove-Item $Sha256File -Force }
-Invoke-Download -Url $Sha256Url -Dest $Sha256File
-
-$expectedHash = (Get-Content -LiteralPath $Sha256File -Raw).Trim().Split()[0].ToLower()
-if ($expectedHash -notmatch '^[0-9a-f]{64}$') {
-    throw "SHA256 ファイルの内容が不正: '$expectedHash'"
-}
-Write-Log "Expected SHA256: $expectedHash"
-
-# 既存 tar のキャッシュチェック
-$needDownload = $true
-if (Test-Path $TarFile) {
-    Write-Log "既存 tar を検出。ハッシュ検証中..."
-    $cur = (Get-FileHash -LiteralPath $TarFile -Algorithm SHA256).Hash.ToLower()
-    if ($cur -eq $expectedHash) {
-        Write-Log "キャッシュ済み tar が一致。ダウンロードをスキップします。"
-        $needDownload = $false
-    } else {
-        Write-Log "ハッシュ不一致のため tar を再取得します。"
-        Remove-Item $TarFile -Force
-    }
-}
-
-if ($needDownload) {
-    Invoke-Download -Url $TarUrl -Dest $TarFile
-    $actual = (Get-FileHash -LiteralPath $TarFile -Algorithm SHA256).Hash.ToLower()
-    Write-Log "Actual   SHA256: $actual"
-    if ($actual -ne $expectedHash) {
-        Remove-Item $TarFile -Force -ErrorAction SilentlyContinue
-        throw "SHA256 不一致。ダウンロード破損の可能性。再実行してください。"
-    }
-    Write-Log "SHA256 検証 OK"
-}
-
-# --- wsl --import ------------------------------------------------------------
+# --- wsl --import -------------------------------------------------------------
 Write-Log "wsl --import 実行中... ($WslDir)"
 & wsl.exe --import $DistroName $WslDir $TarFile --version 2
 if ($LASTEXITCODE -ne 0) {
@@ -145,7 +108,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Log "import 完了"
 
-# 容量節約: tar は削除（次回更新時は再DLされる）
+# 容量節約: tar は削除
 try {
     Remove-Item $TarFile -Force
     Write-Log "キャッシュ tar を削除しました"
