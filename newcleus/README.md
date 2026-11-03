@@ -158,5 +158,9 @@ cd D:\work\homepage-v2-installer
 - **`wsl --shutdown` は使いません**（他のディストロを巻き込むため）。`wsl --terminate <name>` のみ。
 - build / verify 用の distro 名は固定（`newcleus-build` / `newcleus-verify`）。実行前に既存があれば削除する。
 - ベースイメージ（約 371MB）は homepage 版と共有キャッシュ。
-- 実測時間は未計測（homepage と同構成のため **8〜9 分** の見込み）。計測したらこの表を更新する。
+- 実測（2026-11-03 / v1.0.6 / WSL 2.7.3 / `-SkipRelease`）: **9分14秒**
+  - ベース import 10s → プロビジョニング 294s → 軽量化 18s → export 76s → `pigz -9` + `gzip -t` 91s
+    → 検証 import 32s → `verify.sh` 11s → 起動確認 3s（`HTTP 200`）
+  - 成果物: **1,004,664,827 バイト（0.94 GiB）**、tar 3.2GB 前後から圧縮
+  - 軽量化前後の実測は `newcleus-cleanup-*.log` の `size before / size after` を参照
 - GitHub ホストの Windows ランナーは WSL2 が動かないため、CI 化する場合はセルフホスト Windows ランナーが必要。
