@@ -34,13 +34,17 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
 
 > スクリーンショット付きの詳細手順: **[docs/installer-setup.md](docs/installer-setup.md)**
 
-1. [Releases ページ](https://github.com/okamoto53515606/homepage-v2-installer/releases/latest) から `homepage-v2-installer-setup.exe` をダウンロード
-2. ダブルクリックで起動
-3. **Windows SmartScreen** が「認識されないアプリ」と警告した場合 → 「詳細情報」 → 「実行」 をクリック
-4. ウィザードに従って「次へ」を進める
+1. [Releases ページ](https://github.com/okamoto53515606/homepage-v2-installer/releases/latest) から `homepage-v2-installer-setup.zip` をダウンロード
+2. 保存した zip を右クリック → **「すべて展開」**
+3. 展開してできた `homepage-v2-installer-setup.exe` をダブルクリック
+4. **Windows SmartScreen** が「認識されないアプリ」と警告した場合 → 「詳細情報」 → 「実行」 をクリック
+5. ウィザードに従って「次へ」を進める
    - 初回は WSL2 イメージ（約 1.1GB / gzip 圧縮済み）をダウンロードします（回線速度により数分〜数十分）
    - SHA256 検証後、`wsl --import` で取り込みます
-5. インストール完了と同時にタスクトレイにアイコンが常駐します
+6. インストール完了と同時にタスクトレイにアイコンが常駐します
+
+> exe を直接配布すると、セキュリティソフトやブラウザの制限でダウンロードできないことがあるため、
+> **zip にまとめて配布**しています（中に `homepage-v2-installer-setup.exe` が入っています）。
 
 ### 2. 起動 / 停止
 

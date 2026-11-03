@@ -72,7 +72,7 @@ WSL イメージとインストーラ .exe は **リポジトリを分けてリ�
 | 種別 | リポジトリ | タグ例 | latest 指定 |
 |---|---|---|---|
 | WSL イメージ | `okamoto53515606/homepage` | `v2.0.0`, `v2.1.0`, ... | あり（常に最新を追従） |
-| インストーラ .exe | `okamoto53515606/homepage-v2-installer` | `v1.0.0`, `v1.0.1`, ... | 任意 |
+| インストーラ（zip） | `okamoto53515606/homepage-v2-installer` | `v1.0.0`, `v1.0.1`, ... | 任意 |
 
 ### 1. WSL イメージの生成・圧縮・リリース（本体リポ）
 
@@ -124,25 +124,37 @@ Install-Module ps2exe -Scope CurrentUser
 
 ```powershell
 .\build.ps1
-# -> dist\homepage-v2-installer-setup.exe
+# -> dist\homepage-v2-installer-setup.exe（インストーラ本体）
+# -> dist\homepage-v2-installer-setup.zip（配布用・これをリリースに上げる）
 ```
 
-### 4. インストーラ .exe のリリース（インストーラリポ）
+### 4. インストーラ zip のリリース（インストーラリポ）
 
 GitHub の Web UI からも OK、gh CLI でも OK。サイズが小さいので Web UI が手軽。
 
+> **exe を直接アップロードしない。** セキュリティ製品やブラウザの制限でダウンロードできない事例が多いため、
+> 配布物は必ず `homepage-v2-installer-setup.zip` にする（`build.ps1` が自動生成する）。
+
 ```powershell
 # gh CLI 使用例
-gh release create v1.0.0 `
-  D:\work\homepage-v2-installer\dist\homepage-v2-installer-setup.exe `
+gh release create v1.2.0 `
+  D:\work\homepage-v2-installer\dist\homepage-v2-installer-setup.zip `
   --repo okamoto53515606/homepage-v2-installer `
-  --title "Installer v1.0.0" `
-  --notes "インストーラ v1.0.0"
+  --title "Installer v1.2.0" `
+  --notes "インストーラ v1.2.0"
+```
+
+既存リリースの資産を差し替える場合:
+
+```powershell
+gh release upload v1.2.0 .\dist\homepage-v2-installer-setup.zip --repo okamoto53515606/homepage-v2-installer --clobber
+gh release delete-asset v1.2.0 homepage-v2-installer-setup.exe --repo okamoto53515606/homepage-v2-installer --yes
 ```
 
 ### 5. 配布
 
-上記リリースページの `homepage-v2-installer-setup.exe` のダウンロード URL をユーザーに案内。
+上記リリースページの `homepage-v2-installer-setup.zip` のダウンロード URL をユーザーに案内。
+利用者には「右クリック → すべて展開 → 中の exe を実行」を案内する。
 
 ---
 

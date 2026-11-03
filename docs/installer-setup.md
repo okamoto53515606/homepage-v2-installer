@@ -9,14 +9,18 @@
 
 ---
 
-## 1. インストーラーをダウンロードする
+## 1. インストーラー（zip）をダウンロードする
 
 [Releases ページ](https://github.com/okamoto53515606/homepage-v2-installer/releases/latest) を開き、
-`homepage-v2-installer-setup.exe` をクリックして保存します。
+`homepage-v2-installer-setup.zip` をクリックして保存します。
 
-## 2. インストーラーを実行する
+> exe を直接配布すると、セキュリティソフトやブラウザの制限でダウンロードできないことがあるため、
+> **zip にまとめて配布**しています。中に `homepage-v2-installer-setup.exe` が入っています。
 
-保存した `homepage-v2-installer-setup.exe` をダブルクリックします。
+## 2. zip を展開して実行する
+
+保存した zip を右クリック → **「すべて展開」** を選び、展開先のフォルダを開きます。
+展開してできた `homepage-v2-installer-setup.exe` をダブルクリックします。
 
 コード署名に対応していないため、Windows の SmartScreen が警告を出すことがあります。
 その場合は **「詳細情報」** をクリックします。
