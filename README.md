@@ -132,6 +132,7 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
 | [docs/wsl-image-automation.md](docs/wsl-image-automation.md) | 配布用 WSL イメージの自動ビルド |
 | [docs/wsl-image-release-runbook.md](docs/wsl-image-release-runbook.md) | WSL イメージのリリース実行手順 |
 | [docs/update-test.md](docs/update-test.md) | アプリ更新（トレイ）のテスト方法 |
+| [newcleus/README.md](newcleus/README.md) | newcleus CMS 用 WSL イメージの自動ビルド（別リポジトリ向け） |
 
 ## 開発者向け情報
 
