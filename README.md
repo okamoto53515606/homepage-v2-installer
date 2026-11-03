@@ -32,6 +32,8 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
 
 ### 1. インストール
 
+> スクリーンショット付きの詳細手順: **[docs/installer-setup.md](docs/installer-setup.md)**
+
 1. [Releases ページ](https://github.com/okamoto53515606/homepage-v2-installer/releases/latest) から `homepage-v2-installer-setup.exe` をダウンロード
 2. ダブルクリックで起動
 3. **Windows SmartScreen** が「認識されないアプリ」と警告した場合 → 「詳細情報」 → 「実行」 をクリック
@@ -58,6 +60,8 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
 | トレイアイコンダブルクリック | ブラウザを開くショートカット |
 
 ### 4. アプリのバージョン確認・更新
+
+> スクリーンショット付きの詳細手順: **[docs/installer-update.md](docs/installer-update.md)**
 
 トレイを右クリック → **「アプリを更新...」** で、WSL 内のアプリ（`~/homepage`）の
 現在のバージョンと最新バージョンを確認できます（セットアップ画面のアプリは起動しません）。
@@ -106,6 +110,24 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
 | 更新に失敗した | 画面の「原因」とログを確認。旧ツリーは `~/homepage.old-<timestamp>` に残っています |
 | 更新後の画面が古い | セットアップ画面 → 運用メニュー → 「アプリコード更新」を実行（更新コマンドは画像を差し替えません） |
 | その他動作不良 | トレイ右クリック → 「ログフォルダを開く」で `%LOCALAPPDATA%\HomepageV2\logs` の `tray.log` / `install-*.log` / `update-*.log` を確認 |
+
+## ドキュメント
+
+### 利用者向け
+
+| ドキュメント | 内容 |
+|---|---|
+| [docs/installer-setup.md](docs/installer-setup.md) | インストーラーによるセットアップ画面起動手順（スクリーンショット付き） |
+| [docs/installer-update.md](docs/installer-update.md) | インストーラーによるアップデート手順（スクリーンショット付き） |
+
+### 開発者向け
+
+| ドキュメント | 内容 |
+|---|---|
+| [docs/developer.md](docs/developer.md) | ビルド・リリース・設計メモ |
+| [docs/wsl-image-automation.md](docs/wsl-image-automation.md) | 配布用 WSL イメージの自動ビルド |
+| [docs/wsl-image-release-runbook.md](docs/wsl-image-release-runbook.md) | WSL イメージのリリース実行手順 |
+| [docs/update-test.md](docs/update-test.md) | アプリ更新（トレイ）のテスト方法 |
 
 ## 開発者向け情報
 
