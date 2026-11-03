@@ -1,0 +1,6 @@
+# シェルスクリプトは WSL/Linux 側で実行するため LF 固定。
+# CRLF のままだと bash が `$'\r': command not found` で落ちる（過去に実測済み）。
+*.sh text eol=lf
+
+# PowerShell は Windows 専用。改行は環境依存でよい（UTF-8 BOM は各ファイル側で保持する）。
+*.ps1 text

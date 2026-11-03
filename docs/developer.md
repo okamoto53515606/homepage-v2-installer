@@ -40,6 +40,12 @@ homepage-v2-installer/
 │   └── build-exe.ps1
 ├── tools/
 │   ├── make-sha256.ps1
+│   ├── build-wsl-image.ps1     ... WSL イメージの生成〜検証〜リリースを 1 コマンド化
+│   ├── wsl-image/
+│   │   ├── provision.sh        ... build distro 内のツール導入
+│   │   ├── cleanup.sh          ... 軽量化 + 秘匿情報スキャン
+│   │   └── verify.sh           ... import 後のスモークテスト
+│   ├── set-wsl-app-version.ps1 ... 更新テスト用に version を一時的に下げる
 │   └── test-update-wsl-app.ps1  ... バージョン確認・更新の自動テスト
 ├── assets/
 │   └── icon.ico   (別途用意)
@@ -69,6 +75,15 @@ WSL イメージとインストーラ .exe は **リポジトリを分けてリ�
 | インストーラ .exe | `okamoto53515606/homepage-v2-installer` | `v1.0.0`, `v1.0.1`, ... | 任意 |
 
 ### 1. WSL イメージの生成・圧縮・リリース（本体リポ）
+
+> **自動化:** 以下の 1〜10 の手作業は `tools\build-wsl-image.ps1` で置き換え済み。
+> 使い方とリリースノートの命名規則は [wsl-image-automation.md](./wsl-image-automation.md)、
+> 手順を追って実行する場合は [wsl-image-release-runbook.md](./wsl-image-release-runbook.md) を参照。
+>
+> ```powershell
+> # package.json を更新して push → D:\wsl_backup\homepage-release-notes-v2.1.2.md を置く →
+> .\tools\build-wsl-image.ps1
+> ```
 
 WSL 側で tar を export したあと、gzip 圧縮して SHA256 を作成（サイズを約 1/3 に削減）。
 
@@ -195,6 +210,8 @@ NeedRestart() → WslWasAutoInstalled を返す
 - インストーラ .exe の更新は `okamoto53515606/homepage-v2-installer` に `v1.x.y` リリースを作成
 - 利用者は**トレイ → 「アプリを更新...」**で WSL 内のアプリだけを更新できる（この機能）
   - Windows 側のインストーラ .exe 自体の更新は従来どおり新しい exe で再インストール
+- 更新フローのテスト手順（「最新です」で試せないときのバージョン下げ方法を含む）は
+  [update-test.md](./update-test.md) を参照
 
 ## バージョン確認・更新機能の設計
 
