@@ -4,7 +4,7 @@
 ; ============================================================================
 
 #define MyAppName       "homepage-v2-installer"
-#define MyAppVersion    "1.0.0"
+#define MyAppVersion    "1.1.0"
 #define MyAppPublisher  "homepage-v2"
 #define MyAppExeName    "HomepageV2Tray.exe"
 #define MyDistroName    "homepage-v2-latest"
@@ -31,8 +31,11 @@ SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
-ArchitecturesInstallIn64BitMode=x64
-ArchitecturesAllowed=x64
+; Windows 11 のみ対応（README の動作環境と合わせる）
+MinVersion=10.0.22000
+; Inno Setup 6.4+ / 7.x の識別子（旧 x64 は非推奨）
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
@@ -44,9 +47,10 @@ Name: "desktopicon"; Description: "デスクトップにショートカットを
 ; トレイ常駐 .exe（事前に build-exe.ps1 で生成しておく）
 Source: "..\tray-app\HomepageV2Tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; インストール/アンインストール用 PowerShell スクリプト
-Source: "scripts\install-wsl.ps1";   DestDir: "{app}\scripts"; Flags: ignoreversion
-Source: "scripts\uninstall-wsl.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+; インストール / アンインストール / 更新用スクリプト
+Source: "scripts\install-wsl.ps1";      DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\uninstall-wsl.ps1";    DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\update-wsl-app.ps1";   DestDir: "{app}\scripts"; Flags: ignoreversion
 
 ; アイコン
 Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -180,8 +184,8 @@ begin
       try
         DownloadPage.Download;
         // CreateDownloadPage は {tmp} に保存するため、キャッシュへコピー
-        FileCopy(ExpandConstant('{tmp}\{#MyTarFileName}.sha256'), ShaPath, False);
-        FileCopy(ExpandConstant('{tmp}\{#MyTarFileName}'), TarPath, False);
+        CopyFile(ExpandConstant('{tmp}\{#MyTarFileName}.sha256'), ShaPath, False);
+        CopyFile(ExpandConstant('{tmp}\{#MyTarFileName}'), TarPath, False);
         CachedTarPath := TarPath;
         CachedSha256  := LoadSha256FromFile(ShaPath);
         if Length(CachedSha256) <> 64 then

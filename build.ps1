@@ -24,7 +24,12 @@ Write-Host "==> [1/2] tray .exe ビルド" -ForegroundColor Cyan
 # 2. Inno Setup コンパイル
 Write-Host "==> [2/2] Inno Setup コンパイル" -ForegroundColor Cyan
 if (-not $IsccPath -or -not (Test-Path $IsccPath)) {
+    # Inno Setup 7 を優先（6 系はメンテナンスのみ）。
+    # ArchitecturesAllowed=x64compatible のため 6.4 以上が必要。
     $candidates = @(
+        'C:\Program Files (x86)\Inno Setup 7\ISCC.exe',
+        'C:\Program Files\Inno Setup 7\ISCC.exe',
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
         'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
         'C:\Program Files\Inno Setup 6\ISCC.exe',
         (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
@@ -36,7 +41,7 @@ if (-not $IsccPath -or -not (Test-Path $IsccPath)) {
         if ($cmd) { $IsccPath = $cmd.Source }
     }
     if (-not $IsccPath) {
-        throw "ISCC.exe が見つかりません。Inno Setup 6 をインストールするか -IsccPath を指定してください。`n探索パス:`n  $($candidates -join "`n  ")"
+        throw "ISCC.exe が見つかりません。Inno Setup 7.1.1 以上（6.4 以上でも可）をインストールするか -IsccPath を指定してください。`n探索パス:`n  $($candidates -join "`n  ")"
     }
 }
 Write-Host "ISCC: $IsccPath" -ForegroundColor DarkGray

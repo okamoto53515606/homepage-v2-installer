@@ -11,7 +11,7 @@ WSL2 イメージのダウンロード・取り込み・起動・停止を GUI �
    ├─ [Code] tar.gz / sha256 を GitHub Releases からDL (CreateDownloadPage)
    │        キャッシュHIT時はスキップ
    ├─ install-wsl.ps1      ... SHA256検証 → wsl --import
-   ├─ HomepageV2Tray.exe   ... タスクトレイ常駐 (起動/停止/ブラウザ起動)
+   ├─ HomepageV2Tray.exe   ... タスクトレイ常駐 (起動/停止/バージョン確認/更新)
    └─ uninstall-wsl.ps1    ... アンインストール時に wsl --unregister
 ```
 
@@ -33,17 +33,31 @@ homepage-v2-installer/
 │   ├── homepage-v2-installer.iss
 │   └── scripts/
 │       ├── install-wsl.ps1
-│       └── uninstall-wsl.ps1
+│       ├── uninstall-wsl.ps1
+│       └── update-wsl-app.ps1   ... バージョン差し替え + 再ビルドのワーカー
 ├── tray-app/
 │   ├── HomepageV2Tray.ps1
 │   └── build-exe.ps1
 ├── tools/
-│   └── make-sha256.ps1
+│   ├── make-sha256.ps1
+│   └── test-update-wsl-app.ps1  ... バージョン確認・更新の自動テスト
 ├── assets/
 │   └── icon.ico   (別途用意)
 ├── build.ps1
 └── README.md
 ```
+
+## ツールチェーン（脆弱性対応）
+
+| ツール | 要件 | 備考 |
+|---|---|---|
+| Inno Setup | **7.1.1 推奨**（最低 6.4） | `build.ps1` は Inno Setup 7 → 6 の順に探索。`ArchitecturesAllowed=x64compatible` のため 6.4 以上が必要 |
+| ps2exe | **1.0.18 以上** | `tray-app\build-exe.ps1` が不足時に自動更新 |
+| Windows PowerShell | 5.1（OS 同梱） | 別途 EOL はないが、ps2exe + WinForms の制約から PS7 へは移行しない |
+| Node.js（WSL 内） | 24 LTS | `fetch-app.sh` が 24 未満で警告。イメージ側（本体リポ）で 24 系にする |
+
+- `homepage-v2-installer.iss` の `MinVersion=10.0.22000` で Windows 11 未満を拒否する（README の動作環境と一致）
+- 署名（コード署名証明書）は未対応。SmartScreen の警告は README の手順で回避する
 
 ## 配布側の手順（okamoがやること）
 
@@ -179,5 +193,71 @@ NeedRestart() → WslWasAutoInstalled を返す
 - WSL イメージの更新は本体リポ `homepage` に新しいリリース（`v2.x.y`）を `--latest` 付きで作成するだけ
   - インストーラ側は `latest` を参照しているため、exe の再ビルド不要
 - インストーラ .exe の更新は `okamoto53515606/homepage-v2-installer` に `v1.x.y` リリースを作成
-- ユーザー側は **アンインストール → 最新のインストーラ exe で再インストール** で更新
-  - （将来的に「更新」ボタンをトレイに追加する余地あり）
+- 利用者は**トレイ → 「アプリを更新...」**で WSL 内のアプリだけを更新できる（この機能）
+  - Windows 側のインストーラ .exe 自体の更新は従来どおり新しい exe で再インストール
+
+## バージョン確認・更新機能の設計
+
+### フロー
+
+```
+[トレイ] アプリを更新...
+   ↓
+Show-UpdateDialog
+   ├ Update-VersionState
+   │   ├ Test-DistroExists           (wsl --list --quiet, UTF-16LE)
+   │   ├ test -f ~/homepage/package.json  (bash -lc)
+   │   ├ Get-AppVersionFromWsl       (node -p → 失敗時 cat + ConvertFrom-Json)
+   │   └ Get-LatestRelease           (GitHub API → 失敗時 releases/latest の 302)
+   ↓ 「更新する」+ 確認
+   ├ Stop-Server                      (既存を再利用: ポーリング停止 + wsl --terminate)
+   ├ powershell -File update-wsl-app.ps1 ... (別プロセス)
+   │    ├ lock ファイルで二重実行を拒否
+   │    ├ 前提チェック (distro / package.json / .env)
+   │    ├ wsl --terminate (手動実行時も安全に)
+   │    ├ (~) curl → bash -n → fetch-app.sh --update --build --yes --ref <tag>
+   │    ├ 前後の .env SHA256 を記録
+   │    └ RESULT=/APPLIED_VERSION=/BACKUP_DIR=/FAILURE_REASON= を出力
+   ├ GUI は 200ms 間隔でログファイルをテール（リアルタイム表示）
+   ├ 0 なら Start-Server（既存を再利用。ブラウザも開く）
+   └ 失敗時: 原因要約 + ログパス + 切り戻し手順を表示
+```
+
+### 実装上の判断（ハマりどころ）
+
+| 論点 | 判断 | 理由 |
+|---|---|---|
+| 進捗の受取 | **ログファイルのテール** | `Application.Run()` 中の PowerShell イベント（`Register-ObjectEvent`）は発火しないため、stdout のイベント購読は不可。子プロセスは UTF-8 のログを書き、GUI は `FileShare.ReadWrite` で差分を読む |
+| 非同期処理 | すべて UI タイマ | `.NET` スレッドから TextBox を触らない（クロススレッド例外防止） |
+| `wsl.exe` 引数 | `-d` は**引用符なし**、`bash -lc` のコマンドのみ `"` で囲む | `-d "distro"` は `WSL_E_DISTRO_NOT_FOUND` になる（実測） |
+| 改行コード | bash に渡す前に CRLF → LF | CRLF のままだと `bash: $'\r': command not found` で即失敗する |
+| バージョン取得 | `node -p` → 失敗時 `cat` + `ConvertFrom-Json` | nvm を `~/.bashrc` のみで初期化しているイメージでは `bash -lc` に node が入らない（`homepage-v2-test1` で実測） |
+| 最新版の取得 | GitHub API → `releases/latest` の 302 | 未認証 API は 60 req/h で失敗し得るため |
+| 比較 | 自前の semver パーサ | `[version]` はプレリリースを扱えず、文字列比較は `2.10.0 < 2.9.0` になる |
+| `.env` の扱い | Windows 側にコピーしない（SHA256 のみ記録） | 秘密情報を配布 PC のディスクに増やさない |
+| 中止 | 子プロセス Kill + `wsl --terminate` | WSL 内の bash / npm は子プロセスを Kill しても残るため |
+| 二重実行 | `logs\update-wsl-app.lock`（PID + 時刻） | GUI 外から手動実行された場合も防ぐ。死んだ PID は自動解除 |
+| 失敗時の再起動 | 差し替え前の失敗（`CREATED_BACKUP=0`）のみ自動再起動 | 差し替え後はビルド失敗の可能性があり、勝手に起動しない |
+
+### テスト
+
+```powershell
+# 非破壊（semver / 正常系 / API 失敗 / WSL 不在 / 未セットアップ）
+.\tools\test-update-wsl-app.ps1
+
+# 更新失敗（fetch-app.sh の URL を 404 に差し替え。~/homepage は変更されない）
+.\tools\test-update-wsl-app.ps1 -RunFailureCase
+
+# サポート用: 画面を出さずに状態を JSON で出力（結果は logs\tray.log にも残る）
+.\tray-app\HomepageV2Tray.exe -Diagnose -DistroName homepage-v2-test1
+```
+
+手動確認（実更新を伴うため任意）:
+
+| ケース | 期待 |
+|---|---|
+| 最新版で「更新する」 | 「既に最新です…再適用しますか？」→ やめると何もしない |
+| オフライン / API 制限 | 最新バージョン「不明」、更新ボタン無効 |
+| 未セットアップ | 「未セットアップです」、更新ボタン無効 |
+| 更新成功 | 適用後のバージョンが表示され、ヘッダの表示と一致 |
+| 更新失敗 | 原因 / ログパス / `~/homepage.old-<ts>` の案内、`.env` は不変 |
