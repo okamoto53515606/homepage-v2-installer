@@ -38,7 +38,7 @@ D:\wsl_backup\newcleus-release-notes-v1.0.6.md
 | リリースタグ | 自動で `v<version>`（例: `v1.0.6`）になる |
 | 本文 | そのまま GitHub Release の本文になる |
 | 旧形式の互換 | `D:\wsl_backup\release-notes-v1.0.6.md` でも可 |
-| 版なしの互換 | `D:\wsl_backup\newcleus-release-notes.md` も使える（**警告が出る**ので版付きを推奨） |
+| 版なし | **不可**。`newcleus-release-notes.md` のように版が無いファイルは使いません（置いてあってもエラーになります） |
 | 任意パス | `-NotesFile <path>` で明示指定も可 |
 
 `-Version` を省略した場合は、`D:\wsl_backup` 内の `newcleus-release-notes-v*.md` /
@@ -57,6 +57,11 @@ cd D:\work\homepage-v2-installer
 ```
 
 引数なしで実行すると **公開まで** 進みます（homepage 版と同じ挙動）。
+
+> **why `--latest` を付けているか:** newcleus にはインストーラが無く、配布物は GitHub Releases の
+> WSL イメージのみ。`--latest` を付けておくと
+> `https://github.com/okamoto53515606/newcleus/releases/latest/download/newcleus-latest.tar.gz`
+> で常に最新イメージを取れる（利用者に固定 URL を案内できる）。
 
 ### 前提
 

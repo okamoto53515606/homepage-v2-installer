@@ -337,14 +337,8 @@ if ($NotesFile) {
         if (Test-Path -LiteralPath $c) { $resolvedNotes = (Resolve-Path -LiteralPath $c).Path; break }
     }
     if (-not $resolvedNotes) {
-        $legacy = Join-Path $NotesDir 'newcleus-release-notes.md'
-        if (Test-Path -LiteralPath $legacy) {
-            $resolvedNotes = (Resolve-Path -LiteralPath $legacy).Path
-            Write-Log "版なしのリリースノートを使用します（内容が $tag 向けか確認してください）: $resolvedNotes" 'WARN'
-        }
-    }
-    if (-not $resolvedNotes) {
-        Write-Log 'リリースノートが見つかりません。次のいずれかに置いてください:' 'ERROR'
+        Write-Log 'リリースノートが見つかりません（版なしの newcleus-release-notes.md は使いません）。' 'ERROR'
+        Write-Log '次のいずれかに置いてください:' 'ERROR'
         Write-Log "  $(Join-Path $NotesDir "newcleus-release-notes-v$ver.md")" 'ERROR'
         Write-Log "  $(Join-Path $NotesDir "release-notes-v$ver.md")" 'ERROR'
         Write-Log 'または -NotesFile で明示指定してください。' 'ERROR'
